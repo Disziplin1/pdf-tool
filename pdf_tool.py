@@ -10,7 +10,7 @@ GITHUB_REPO  = "Disziplin1/pdf-tool"
 INSTALL_DIR  = os.path.join(os.environ.get("LOCALAPPDATA", "C:\\Temp"), "PDF편집기")
 INSTALL_EXE  = os.path.join(INSTALL_DIR, "PDF 편집기.exe")
 
-# ── 로컬 설치 (첫 실행 시 AppData 에 설치 + 바탕화면 바로가기) ──
+# ── 로컬 설치 (첫 실행 시 AppData 에 설치) ──
 def _ensure_local():
     if not getattr(sys, "frozen", False):
         return
@@ -21,22 +21,6 @@ def _ensure_local():
 
     os.makedirs(INSTALL_DIR, exist_ok=True)
     shutil.copy2(sys.executable, INSTALL_EXE)
-
-    # 바탕화면 바로가기 생성
-    desktop  = os.path.join(os.path.expanduser("~"), "Desktop")
-    lnk_path = os.path.join(desktop, "PDF 편집기.lnk")
-    if not os.path.exists(lnk_path):
-        ps_cmd = (
-            f"$ws=$([System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory());"
-            f"$ws=(New-Object -ComObject WScript.Shell);"
-            f"$s=$ws.CreateShortcut('{lnk_path}');"
-            f"$s.TargetPath='{INSTALL_EXE}';"
-            f"$s.Save()"
-        )
-        subprocess.run(
-            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd],
-            creationflags=0x08000000
-        )
 
     subprocess.Popen([INSTALL_EXE])
     sys.exit(0)
