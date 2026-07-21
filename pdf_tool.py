@@ -5,7 +5,7 @@ PDF 도구  ·  무료 · 오프라인 · 완전 로컬
 """
 import sys, os, shutil, subprocess, threading
 
-VERSION      = "0.0"                       # 배포.bat 이 자동 업데이트
+VERSION = "20260721.0909"                       # 배포.bat 이 자동 업데이트
 GITHUB_REPO  = "Disziplin1/pdf-tool"
 INSTALL_DIR  = os.path.join(os.environ.get("LOCALAPPDATA", "C:\\Temp"), "PDF편집기")
 INSTALL_EXE  = os.path.join(INSTALL_DIR, "PDF 편집기.exe")
@@ -857,10 +857,10 @@ class OrganizeTab(tk.Frame):
             for pg in self.pages:
                 src = pg["src"]
                 if src not in cache: cache[src] = PdfReader(src)
-                page = cache[src].pages[pg["pidx"]]
-                rot  = pg.get("rot",0)
-                if rot: page.rotate(rot)
-                w.add_page(page)
+                page  = cache[src].pages[pg["pidx"]]
+                added = w.add_page(page)   # 원본과 독립된 클론 객체 반환
+                rot   = pg.get("rot",0)
+                if rot: added.rotate(rot)
             with open(out,"wb") as f: w.write(f)
             messagebox.showinfo("완료",f"저장 완료!\n{out}")
         except Exception as e:
