@@ -5,7 +5,7 @@ PDF 도구  ·  무료 · 오프라인 · 완전 로컬
 """
 import sys, os, shutil, subprocess, threading
 
-VERSION = "20260721.1343"                       # 배포.bat 이 자동 업데이트
+VERSION = "20260721.1555"                       # 배포.bat 이 자동 업데이트
 GITHUB_REPO  = "Disziplin1/pdf-tool"
 INSTALL_DIR  = os.path.join(os.environ.get("LOCALAPPDATA", "C:\\Temp"), "PDF편집기")
 INSTALL_EXE  = os.path.join(INSTALL_DIR, "PDF 편집기.exe")
@@ -94,29 +94,31 @@ except ImportError:
 _id_gen = itertools.count()
 
 # ══════════════════════════════════════════════════════════
-#  아이폰 글래스 테마
+#  UI 테마  (메인 컬러 #C0392B 계열)
 # ══════════════════════════════════════════════════════════
-BG       = "#ede8f8"   # 연보라 배경
-PANEL    = "#fafbff"   # 패널
-TOOLBAR  = "#f4f0fc"   # 툴바 (frosted)
-CARD     = "#ffffff"   # 카드
-CARD_CHK = "#ede6ff"   # 선택 카드
-ACCENT   = "#7928ca"   # iOS 보라
-ACCENT_L = "#9b4fdf"   # 밝은 보라
-TEXT     = "#1a0840"   # 진한 보라-검정
-TEXT_DIM = "#9070b8"   # 보조
-BORDER   = "#e2d8f4"   # 테두리
-SUCCESS  = "#30d158"   # iOS 초록
-DANGER   = "#ff3b30"   # iOS 빨강
-DROPH    = "#e4d8ff"   # 드래그오버
-INSLINE  = "#7928ca"
-SH1      = "#c8bce0"   # 그림자 (진)
-SH2      = "#ddd4f0"   # 그림자 (연)
-PREV_BG  = "#140830"   # 미리보기 배경
+BG       = "#F2F1EF"   # 창 배경 (아주 밝은 회색)
+PANEL    = "#FFFFFF"   # 패널 (헤더 · 하단 컨트롤 바)
+TOOLBAR  = "#EAE7E5"   # 툴바 (창 배경과 살짝 다른 밝기)
+CARD     = "#FFFFFF"   # 카드 / 파일 영역
+CARD_CHK = "#FDEDEC"   # 선택 카드 (Light Background)
+ACCENT   = "#C0392B"   # Primary
+ACCENT_L = "#A93226"   # Hover
+ACCENT_D = "#922B21"   # Pressed
+TEXT     = "#2B2B2B"   # 본문 텍스트 (짙은 회색)
+TEXT_DIM = "#8A8A8A"   # 보조 텍스트
+BORDER   = "#E6B0AA"   # 테두리
+SUCCESS  = "#30d158"   # (미사용 — 이전 iOS 초록, 하위 호환을 위해 유지)
+DANGER   = "#ff3b30"   # 삭제 등 위험 동작 (기존 유지)
+DROPH    = "#FDEDEC"   # 드래그오버 (Light Background)
+INSLINE  = "#C0392B"
+SH1      = "#D9D6D4"   # 그림자 (진)
+SH2      = "#EAE8E6"   # 그림자 (연)
+PREV_BG  = "#140830"   # 미리보기 배경 (별도 다크 테마 유지)
 
 FM     = "맑은 고딕"
 FONT   = (FM, 10)
 FONT_B = (FM, 10, "bold")
+FONT_SB= (FM, 11, "bold")   # Semi Bold 대체 (탭용)
 FONT_H = (FM, 14, "bold")
 FONT_S = (FM, 9)
 FONT_XS= (FM, 8)
@@ -125,12 +127,24 @@ FONT_XS= (FM, 8)
 # ══════════════════════════════════════════════════════════
 #  공용 유틸
 # ══════════════════════════════════════════════════════════
-def mkbtn(p, txt, cmd, bg=ACCENT, fg="white", px=12, py=6, **kw):
-    hl = ACCENT_L if bg == ACCENT else bg
+def _shade(hexcol, factor):
+    """hexcol 을 factor 비율로 밝기 조정 (hover/pressed 색상 자동 계산용)"""
+    h = hexcol.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    r, g, b = (max(0, min(255, int(c*factor))) for c in (r, g, b))
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def mkbtn(p, txt, cmd, bg=ACCENT, fg="white", px=12, py=8, **kw):
+    if bg == ACCENT:
+        hover, press = ACCENT_L, ACCENT_D
+    else:
+        hover, press = _shade(bg, 0.88), _shade(bg, 0.76)
     b  = tk.Button(p, text=txt, command=cmd, bg=bg, fg=fg,
                    font=FONT_B, relief="flat", cursor="hand2",
-                   padx=px, pady=py, bd=0, **kw)
-    b.bind("<Enter>", lambda e: b.config(bg=hl))
+                   padx=px, pady=py, bd=0,
+                   activebackground=press, activeforeground=fg, **kw)
+    b.bind("<Enter>", lambda e: b.config(bg=hover))
     b.bind("<Leave>", lambda e: b.config(bg=bg))
     return b
 
@@ -453,6 +467,7 @@ class OrganizeTab(tk.Frame):
         self.drag_moved= False
         self.hover_idx = None
         self._rid      = None
+        self.status_cb = None   # 상태 표시줄 갱신 콜백 (App 에서 연결)
         self._build()
 
     @property
@@ -468,42 +483,56 @@ class OrganizeTab(tk.Frame):
 
     # ── UI ──────────────────────────────────────────────────
     def _build(self):
-        tb = tk.Frame(self, bg=TOOLBAR, pady=6)
+        tb = tk.Frame(self, bg=TOOLBAR, pady=8)
         tb.pack(fill="x")
 
-        mkbtn(tb, "+ 파일 추가", self._add_files).pack(side="left", padx=(12,4))
+        # ── 파일 그룹 ────────────────────────────────────
+        mkbtn(tb, "+ 파일 추가", self._add_files).pack(side="left", padx=(12,6))
         sep_v(tb)
 
+        # ── 선택 그룹 ────────────────────────────────────
         self.chk_var = tk.BooleanVar()
         tk.Checkbutton(tb, variable=self.chk_var, command=self._toggle_all,
                        text="전체선택", bg=TOOLBAR, fg=TEXT, selectcolor=ACCENT,
                        activebackground=TOOLBAR, font=FONT_S,
-                       bd=0, highlightthickness=0).pack(side="left", padx=4)
-
-        mkbtn(tb, "선택 삭제", self._delete_checked, bg=DANGER, py=5).pack(side="left", padx=4)
-        mkbtn(tb, "전체 삭제", self._clear,           bg=DANGER, py=5).pack(side="left", padx=4)
+                       bd=0, highlightthickness=0).pack(side="left", padx=(6,6))
+        mkbtn(tb, "선택 삭제", self._delete_checked, bg=DANGER, py=6).pack(side="left", padx=3)
+        mkbtn(tb, "전체 삭제", self._clear,           bg=DANGER, py=6).pack(side="left", padx=3)
         sep_v(tb)
+
+        # ── 회전 그룹 ────────────────────────────────────
         mkbtn(tb, "↺ 선택 회전", self._rotate_checked, bg=TOOLBAR,
-              fg=TEXT, py=5).pack(side="left", padx=4)
+              fg=TEXT, py=6).pack(side="left", padx=(6,4))
 
-        mkbtn(tb, "▶  PDF 내보내기", self._export, bg=SUCCESS).pack(side="right", padx=(4,12))
+        # ── 내보내기 (오른쪽, 가장 중요한 동작이라 강조) ──
+        mkbtn(tb, "▶  PDF 내보내기", self._export, bg=ACCENT,
+              px=20, py=11).pack(side="right", padx=(4,12))
         sep_v(tb)
-        mkbtn(tb, "+", lambda: self._zoom(1.18), bg=TOOLBAR, fg=TEXT, px=8, py=5).pack(side="right", padx=2)
-        mkbtn(tb, "−", lambda: self._zoom(0.85), bg=TOOLBAR, fg=TEXT, px=8, py=5).pack(side="right", padx=2)
+
+        # ── 확대/축소 그룹 (동일 크기 정사각형) ──────────
+        mkbtn(tb, "+", lambda: self._zoom(1.18), bg=TOOLBAR, fg=TEXT,
+              px=10, py=9, width=2).pack(side="right", padx=2)
+        mkbtn(tb, "−", lambda: self._zoom(0.85), bg=TOOLBAR, fg=TEXT,
+              px=10, py=9, width=2).pack(side="right", padx=2)
         self.info_lbl = tk.Label(tb, text="", font=FONT_S, bg=TOOLBAR, fg=TEXT_DIM)
         self.info_lbl.pack(side="right", padx=10)
 
-        self.hint = tk.Label(self,
-            text="PDF 파일을 여기로 끌어다 놓으세요\n"
-                 "여러 파일 동시 추가  ·  드래그로 순서 변경  ·  🔍 버튼으로 미리보기",
-            font=FONT, bg=BG, fg=TEXT_DIM, justify="center")
+        # ── 안내 문구 (제목 + 설명 2단 계층) ──────────────
+        self.hint = tk.Frame(self, bg=BG)
+        tk.Label(self.hint, text="PDF 파일을 여기에 드래그하세요",
+                 font=(FM, 13, "bold"), bg=BG, fg=TEXT).pack()
+        tk.Label(self.hint,
+                 text="여러 파일 추가   ·   드래그로 순서 변경   ·   🔍 버튼으로 미리보기",
+                 font=FONT_S, bg=BG, fg=TEXT_DIM).pack(pady=(6,0))
         self.hint.pack(pady=60)
 
+        # ── 파일 영역 (흰 배경 + 옅은 테두리 카드) ────────
         cf = tk.Frame(self, bg=BG)
-        cf.pack(fill="both", expand=True)
+        cf.pack(fill="both", expand=True, padx=12, pady=(0,12))
         vs = tk.Scrollbar(cf, orient="vertical", bg=TOOLBAR, troughcolor=BG)
         vs.pack(side="right", fill="y")
-        self.canvas = tk.Canvas(cf, bg=BG, bd=0, highlightthickness=0,
+        self.canvas = tk.Canvas(cf, bg=CARD, bd=0,
+                                highlightthickness=1, highlightbackground=BORDER,
                                 yscrollcommand=vs.set)
         self.canvas.pack(fill="both", expand=True)
         vs.config(command=self.canvas.yview)
@@ -521,7 +550,7 @@ class OrganizeTab(tk.Frame):
             for w in (self, self.canvas, self.hint):
                 w.drop_target_register(DND_FILES)
                 w.dnd_bind("<<DragEnter>>", lambda e: self.canvas.config(bg=DROPH))
-                w.dnd_bind("<<DragLeave>>", lambda e: self.canvas.config(bg=BG))
+                w.dnd_bind("<<DragLeave>>", lambda e: self.canvas.config(bg=CARD))
                 w.dnd_bind("<<Drop>>",      self._dnd_drop)
 
     def _zoom(self, f):
@@ -547,7 +576,9 @@ class OrganizeTab(tk.Frame):
 
         if n == 0:
             self.hint.pack(pady=60)
-            self.info_lbl.config(text=""); return
+            self.info_lbl.config(text="")
+            if self.status_cb: self.status_cb(0, 0, 0)
+            return
 
         self.hint.pack_forget()
         cols    = self._cols()
@@ -575,6 +606,9 @@ class OrganizeTab(tk.Frame):
         nc = len(self.checked)
         self.info_lbl.config(text=f"{n}페이지  |  {nc}개 선택")
         self.chk_var.set(n > 0 and nc == n)
+        if self.status_cb:
+            nf = len({pg["src"] for pg in self.pages})
+            self.status_cb(nf, nc, n)
 
     # ── 카드 그리기 (글래스 스타일) ─────────────────────────
     def _draw_card(self, idx, x0, y0, pg):
@@ -587,7 +621,7 @@ class OrganizeTab(tk.Frame):
         img_h = self.CH - bbar          # 썸네일 영역 높이
 
         # ── 소프트 그림자 (3겹) ──────────────────────────
-        for d, col in [(6,SH1),(4,SH2),(2,"#eee8f8")]:
+        for d, col in [(6,SH1),(4,SH2),(2,"#F2F2F2")]:
             rr(self.canvas, x0+d, y0+d, x0+self.CW+d, y0+self.CH+d,
                r=14, fill=col, outline="", tags=(tag,"shadow"))
 
@@ -598,9 +632,9 @@ class OrganizeTab(tk.Frame):
            r=14, fill=card_fill, outline=card_bd,
            width=2 if chk else 1, tags=(tag,"card"))
 
-        # ── 썸네일 영역 배경 (연보라 tint) ──────────────
+        # ── 썸네일 영역 배경 (연한 회색 tint) ────────────
         rr(self.canvas, x0+1, y0+1, x0+self.CW-1, y0+img_h,
-           r=14, fill="#f5f0ff", outline="", tags=(tag,"card"))
+           r=14, fill="#F7F7F7", outline="", tags=(tag,"card"))
 
         # ── 썸네일 이미지 ────────────────────────────────
         pil = pg.get("pil")
@@ -619,7 +653,7 @@ class OrganizeTab(tk.Frame):
             # 이미지 주변 흰 프레임 + 부드러운 그림자
             self.canvas.create_rectangle(
                 cx2-nw//2-2, icy-nh//2-2, cx2+nw//2+2, icy+nh//2+2,
-                fill="#ddd8ee", outline="", tags=(tag,"card"))
+                fill="#DDDDDD", outline="", tags=(tag,"card"))
             self.canvas.create_rectangle(
                 cx2-nw//2-1, icy-nh//2-1, cx2+nw//2+1, icy+nh//2+1,
                 fill="white", outline="", tags=(tag,"card"))
@@ -652,7 +686,7 @@ class OrganizeTab(tk.Frame):
                 font=(FM,10,"bold"), fill="white", tags=(tag,cbt,"cb"))
         else:
             self.canvas.create_oval(cbx-r,cby-r,cbx+r,cby+r,
-                fill="white", outline="#b8a8d8", width=1.5, tags=(tag,cbt,"cb"))
+                fill="white", outline="#C9C9C9", width=1.5, tags=(tag,cbt,"cb"))
 
     # ── 호버 오버레이 ────────────────────────────────────────
     def _draw_hover_ol(self, idx):
@@ -661,11 +695,11 @@ class OrganizeTab(tk.Frame):
         bbar   = self.BBAR_H
         bar_y  = y0 + self.CH - bbar
 
-        # 보라 테두리 (카드 전체)
+        # 메인 컬러 테두리 (카드 전체)
         rr(self.canvas, x0-3, y0-3, x0+self.CW+3, y0+self.CH+3,
            r=16, fill="", outline=ACCENT, width=3, tags="hov")
 
-        # 하단 바를 보라 그라데이션처럼
+        # 하단 바 강조
         rr(self.canvas, x0+1, bar_y+1, x0+self.CW-1, y0+self.CH-1,
            r=0, fill=ACCENT, outline="", tags="hov")
         # 아래 모서리만 둥글게
@@ -676,10 +710,10 @@ class OrganizeTab(tk.Frame):
         by = bar_y + bbar//2
         r  = min(13, bbar//2 - 4)
         btn_styles = {
-            "preview": ("#ffffff", ACCENT,    ACCENT),
-            "rotate":  ("#e8d8ff", ACCENT_L,  ACCENT),
-            "dup":     ("#dde8ff", "#4488cc",  "#3366bb"),
-            "delete":  (DANGER,   "#ff8070",  "white"),
+            "preview": ("#ffffff",  ACCENT,   ACCENT),
+            "rotate":  (CARD_CHK,   ACCENT_L, ACCENT),
+            "dup":     ("#ffffff",  ACCENT_D, ACCENT_D),
+            "delete":  (DANGER,    "#ff8070", "white"),
         }
         for icon, key, rx in self.HOV_BTNS:
             bx   = x0 + int(self.CW * rx)
@@ -817,7 +851,7 @@ class OrganizeTab(tk.Frame):
         self._load_pdfs(list(ps))
 
     def _dnd_drop(self, event):
-        self.canvas.config(bg=BG)
+        self.canvas.config(bg=CARD)
         self._load_pdfs([p for p in parse_paths(event.data)
                          if p.lower().endswith(".pdf")])
 
@@ -887,6 +921,7 @@ class ConvertTab(tk.Frame):
         self.img_drag_tgt   = None
         self.img_drag_moved = False
         self.out_name       = tk.StringVar(value="")
+        self.status_cb      = None   # 상태 표시줄 갱신 콜백 (App 에서 연결)
         self._build()
 
     # ── UI 구성 ─────────────────────────────────────────────
@@ -920,12 +955,13 @@ class ConvertTab(tk.Frame):
         self.status_lbl.pack(side="left")
         self.reset_btn = mkbtn(sb, "✕ 초기화", self._reset, bg=DANGER, px=8, py=3)
 
-        # ── 미리보기 캔버스 ─────────────────────────────────
-        cf = tk.Frame(self, bg=BG); cf.pack(fill="both", expand=True, padx=20)
+        # ── 미리보기 캔버스 (흰 배경 + 옅은 테두리 카드) ─────
+        cf = tk.Frame(self, bg=BG); cf.pack(fill="both", expand=True, padx=20, pady=(0,12))
         pvs = tk.Scrollbar(cf, orient="vertical", bg=TOOLBAR, troughcolor=BG)
         pvs.pack(side="right", fill="y")
-        self.pcanvas = tk.Canvas(cf, bg=BG, bd=1, relief="solid",
-                                 highlightthickness=0, yscrollcommand=pvs.set)
+        self.pcanvas = tk.Canvas(cf, bg=CARD, bd=0,
+                                 highlightthickness=1, highlightbackground=BORDER,
+                                 yscrollcommand=pvs.set)
         self.pcanvas.pack(fill="both", expand=True)
         pvs.config(command=self.pcanvas.yview)
         self.pcanvas.bind("<Configure>",       lambda e: self._render_preview())
@@ -952,11 +988,16 @@ class ConvertTab(tk.Frame):
         self.ext_lbl = tk.Label(fn_row, text="", font=FONT_B, bg=PANEL, fg=ACCENT)
         self.ext_lbl.pack(side="left")
 
-        # 저장 버튼
-        self.dl_btn = mkbtn(inner, "▼  저장하기", self._do_save, px=36, py=10)
+        # 저장 버튼 (가장 중요한 동작이라 강조)
+        self.dl_btn = mkbtn(inner, "▼  저장하기", self._do_save, px=36, py=12)
         self.dl_btn.pack(pady=(4,2))
 
         self._reset()
+
+    # ── 상태 표시줄 갱신 (기존 status_lbl 텍스트를 그대로 전달) ──
+    def _set_status(self, text):
+        self.status_lbl.config(text=text)
+        if self.status_cb: self.status_cb(text)
 
     # ── 드롭존 ──────────────────────────────────────────────
     def _dz_hl(self, on):
@@ -1012,7 +1053,7 @@ class ConvertTab(tk.Frame):
         base = os.path.splitext(os.path.basename(path))[0]
         self.out_name.set(base)
         self.ext_lbl.config(text=".png")
-        self.status_lbl.config(text=f"📄  PDF  ·  {n}페이지  →  PNG 이미지로 변환 (최고 화질)")
+        self._set_status(f"📄  PDF  ·  {n}페이지  →  PNG 이미지로 변환 (최고 화질)")
         self.reset_btn.pack(side="right")
         self.dl_btn.config(state="normal", bg=ACCENT)
         self._render_preview()
@@ -1041,7 +1082,7 @@ class ConvertTab(tk.Frame):
                 base = os.path.splitext(os.path.basename(self.img_files[0]))[0]
                 self.out_name.set(base)
             self.ext_lbl.config(text=".pdf")
-            self.status_lbl.config(text=f"🖼  이미지  ·  {n}개  →  PDF로 변환")
+            self._set_status(f"🖼  이미지  ·  {n}개  →  PDF로 변환")
             self.reset_btn.pack(side="right")
             self.dl_btn.config(state="normal", bg=ACCENT)
             self._render_preview()
@@ -1056,9 +1097,9 @@ class ConvertTab(tk.Frame):
         self.img_hover = None
         self.out_name.set("")
         self.ext_lbl.config(text="")
-        self.status_lbl.config(text="")
+        self._set_status("")
         self.reset_btn.pack_forget()
-        self.dl_btn.config(state="disabled", bg="#b8a8d8")
+        self.dl_btn.config(state="disabled", bg="#CCCCCC")
         self.pcanvas.delete("all")
         self.pcanvas.after(80, self._draw_hint)
 
@@ -1122,7 +1163,7 @@ class ConvertTab(tk.Frame):
         rr(self.pcanvas, x0, y0, x0+self.ICW, y0+self.ICH,
            r=12, fill=CARD, outline=BORDER, width=1, tags=(tag,"card"))
         rr(self.pcanvas, x0+1, y0+1, x0+self.ICW-1, y0+lby,
-           r=12, fill="#f5f0ff", outline="", tags=(tag,"card"))
+           r=12, fill="#F7F7F7", outline="", tags=(tag,"card"))
         if PREVIEW_OK and thumb:
             sc  = min((self.ICW-16)/thumb.width, (lby-y0-16)/thumb.height)
             nw  = max(1, int(thumb.width*sc))
@@ -1132,7 +1173,7 @@ class ConvertTab(tk.Frame):
             self.img_photos.append(photo)
             icy = y0+(lby-y0)//2
             self.pcanvas.create_rectangle(cx2-nw//2-2,icy-nh//2-2,cx2+nw//2+2,icy+nh//2+2,
-                fill="#ddd8ee", outline="", tags=(tag,"card"))
+                fill="#DDDDDD", outline="", tags=(tag,"card"))
             self.pcanvas.create_rectangle(cx2-nw//2-1,icy-nh//2-1,cx2+nw//2+1,icy+nh//2+1,
                 fill="white", outline="", tags=(tag,"card"))
             self.pcanvas.create_image(cx2, icy, image=photo, tags=(tag,"card"))
@@ -1244,8 +1285,7 @@ class ConvertTab(tk.Frame):
             if not self.img_files:
                 self._reset()
             else:
-                self.status_lbl.config(
-                    text=f"🖼  이미지  ·  {len(self.img_files)}개  →  PDF로 변환")
+                self._set_status(f"🖼  이미지  ·  {len(self.img_files)}개  →  PDF로 변환")
                 self._render_preview()
 
     # ── 저장 ────────────────────────────────────────────────
@@ -1311,7 +1351,7 @@ class App(TkinterDnD.Tk if DND_OK else tk.Tk):
         self.after(3000, lambda: _check_update(self))  # 3초 후 백그라운드 업데이트 확인
 
     def _build(self):
-        # 헤더 (글래스 느낌)
+        # 헤더
         hdr = tk.Frame(self, bg=PANEL)
         hdr.pack(fill="x")
         tk.Label(hdr, text="  PDF 편집기", font=(FM,13,"bold"),
@@ -1323,28 +1363,67 @@ class App(TkinterDnD.Tk if DND_OK else tk.Tk):
                  font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(side="left", padx=8)
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
 
+        # 탭 버튼 (선택 탭: Bold + 메인 컬러 배경 / 비선택: 연한 배경)
         tb = tk.Frame(self, bg=BG)
-        tb.pack(fill="x", padx=16, pady=8)
+        tb.pack(fill="x", padx=16, pady=10)
         self.tabs = {}; self.tbtns = {}
+        self._active_tab = None
 
         for key,lbl in [("organize","정리  (병합 · 분할)"),("convert","변환  (PDF ↔ 이미지)")]:
-            b = tk.Button(tb, text=lbl, font=FONT_B, bg=ACCENT, fg="white",
-                          relief="flat", padx=18, pady=9, bd=0, cursor="hand2",
+            b = tk.Button(tb, text=lbl, font=FONT_SB, bg=TOOLBAR, fg=TEXT_DIM,
+                          relief="flat", padx=20, pady=10, bd=0, cursor="hand2",
                           command=lambda k=key: self._sw(k))
+            b.bind("<Enter>", lambda e, k=key: self._tab_hover(k, True))
+            b.bind("<Leave>", lambda e, k=key: self._tab_hover(k, False))
             b.pack(side="left", padx=(0,4)); self.tbtns[key] = b
 
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
+
+        # 상태 표시줄 (창 맨 아래 고정 — cont 보다 먼저 패킹해 공간 확보)
+        self.status_var = tk.StringVar(value="")
+        status_bar = tk.Frame(self, bg=PANEL)
+        tk.Frame(status_bar, bg=BORDER, height=1).pack(fill="x")
+        tk.Label(status_bar, textvariable=self.status_var, font=FONT_S,
+                 bg=PANEL, fg=TEXT_DIM, anchor="w").pack(fill="x", padx=14, pady=6)
+        status_bar.pack(fill="x", side="bottom")
+
         cont = tk.Frame(self, bg=BG); cont.pack(fill="both", expand=True)
         self.tabs["organize"] = OrganizeTab(cont)
         self.tabs["convert"]  = ConvertTab(cont)
+        self.tabs["organize"].status_cb = self._update_status_organize
+        self.tabs["convert"].status_cb  = self._update_status_convert
         self._sw("organize")
 
+    def _tab_hover(self, key, entering):
+        b = self.tbtns[key]
+        base = ACCENT if self._active_tab == key else TOOLBAR
+        b.config(bg=_shade(base, 0.9) if entering else base)
+
     def _sw(self, key):
+        self._active_tab = key
         for f in self.tabs.values(): f.pack_forget()
         self.tabs[key].pack(fill="both", expand=True)
         for k,b in self.tbtns.items():
-            b.config(bg=ACCENT if k==key else "#d4c8f0",
-                     fg="white" if k==key else TEXT)
+            active = (k == key)
+            b.config(bg=ACCENT if active else TOOLBAR,
+                     fg="white" if active else TEXT_DIM,
+                     font=FONT_B if active else FONT_SB)
+        if key == "organize":
+            ot = self.tabs["organize"]
+            self._update_status_organize(len({pg["src"] for pg in ot.pages}),
+                                          len(ot.checked), len(ot.pages))
+        else:
+            self._update_status_convert(self.tabs["convert"].status_lbl.cget("text"))
+
+    # ── 상태 표시줄 갱신 (기존에 이미 추적 중인 정보만 표시) ──
+    def _update_status_organize(self, files, checked, pages):
+        if pages == 0:
+            self.status_var.set("파일을 추가하면 상태가 표시됩니다")
+        else:
+            self.status_var.set(f"파일 {files}개  |  선택 {checked}개  |  총 {pages}페이지")
+
+    def _update_status_convert(self, text):
+        self.status_var.set(text if text else "파일을 추가하면 상태가 표시됩니다")
 
 
 if __name__ == "__main__":
