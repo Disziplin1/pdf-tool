@@ -517,16 +517,9 @@ class OrganizeTab(tk.Frame):
         self.info_lbl = tk.Label(tb, text="", font=FONT_S, bg=TOOLBAR, fg=TEXT_DIM)
         self.info_lbl.pack(side="right", padx=10)
 
-        # ── 안내 문구 (제목 + 설명 2단 계층) ──────────────
-        self.hint = tk.Frame(self, bg=BG)
-        tk.Label(self.hint, text="PDF 파일을 여기에 드래그하세요",
-                 font=(FM, 13, "bold"), bg=BG, fg=TEXT).pack()
-        tk.Label(self.hint,
-                 text="여러 파일 추가   ·   드래그로 순서 변경   ·   🔍 버튼으로 미리보기",
-                 font=FONT_S, bg=BG, fg=TEXT_DIM).pack(pady=(6,0))
-        self.hint.pack(pady=60)
-
         # ── 파일 영역 (흰 배경 + 옅은 테두리 카드) ────────
+        # 안내 문구(제목+설명)는 파일이 없을 때 이 캔버스 위에 직접 그려서
+        # (_render 참고) 드롭 영역과 안내 문구 위치가 항상 일치하도록 한다.
         cf = tk.Frame(self, bg=BG)
         cf.pack(fill="both", expand=True, padx=12, pady=(0,12))
         vs = tk.Scrollbar(cf, orient="vertical", bg=TOOLBAR, troughcolor=BG)
@@ -547,11 +540,13 @@ class OrganizeTab(tk.Frame):
                          lambda e: self.canvas.yview_scroll(-1*(e.delta//120), "units"))
 
         if DND_OK:
-            for w in (self, self.canvas, self.hint):
+            for w in (self, self.canvas):
                 w.drop_target_register(DND_FILES)
                 w.dnd_bind("<<DragEnter>>", lambda e: self.canvas.config(bg=DROPH))
                 w.dnd_bind("<<DragLeave>>", lambda e: self.canvas.config(bg=CARD))
                 w.dnd_bind("<<Drop>>",      self._dnd_drop)
+
+        self.after(80, self._render)   # 초기 안내 문구를 캔버스에 바로 그리기
 
     def _zoom(self, f):
         self.scale = max(0.45, min(2.5, self.scale*f)); self._render()
@@ -575,12 +570,18 @@ class OrganizeTab(tk.Frame):
         n = len(self.pages)
 
         if n == 0:
-            self.hint.pack(pady=60)
+            cw = max(self.canvas.winfo_width(), 400)
+            ch = max(self.canvas.winfo_height(), 300)
+            self.canvas.create_text(cw//2, ch//2 - 14,
+                text="PDF 파일을 여기에 드래그하세요",
+                font=(FM, 13, "bold"), fill=TEXT, justify="center")
+            self.canvas.create_text(cw//2, ch//2 + 16,
+                text="여러 파일 추가   ·   드래그로 순서 변경   ·   🔍 버튼으로 미리보기",
+                font=FONT_S, fill=TEXT_DIM, justify="center")
             self.info_lbl.config(text="")
             if self.status_cb: self.status_cb(0, 0, 0)
             return
 
-        self.hint.pack_forget()
         cols    = self._cols()
         rows    = (n+cols-1)//cols
         total_h = self.PAD + rows*(self.CH+self.PAD)
