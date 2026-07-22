@@ -5,7 +5,7 @@ PDF 도구  ·  무료 · 오프라인 · 완전 로컬
 """
 import sys, os, shutil, subprocess, threading
 
-VERSION = "20260722.1108"                       # 배포.bat 이 자동 업데이트
+VERSION = "20260722.1646"                       # 배포.bat 이 자동 업데이트
 GITHUB_REPO  = "Disziplin1/pdf-tool"
 INSTALL_DIR  = os.path.join(os.environ.get("LOCALAPPDATA", "C:\\Temp"), "PDF편집기")
 INSTALL_EXE  = os.path.join(INSTALL_DIR, "PDF 편집기.exe")
