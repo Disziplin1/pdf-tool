@@ -572,9 +572,10 @@ class OrganizeTab(tk.Frame):
         if n == 0:
             cw = max(self.canvas.winfo_width(), 400)
             ch = max(self.canvas.winfo_height(), 300)
+            self.canvas.configure(scrollregion=(0,0,cw,ch))  # 빈 상태에서는 스크롤 불가
             self.canvas.create_text(cw//2, ch//2 - 14,
                 text="PDF 파일을 여기에 드래그하세요",
-                font=(FM, 13, "bold"), fill=TEXT, justify="center")
+                font=(FM, 13, "bold"), fill="#6B6B6B", justify="center")
             self.canvas.create_text(cw//2, ch//2 + 16,
                 text="여러 파일 추가   ·   드래그로 순서 변경   ·   🔍 버튼으로 미리보기",
                 font=FONT_S, fill=TEXT_DIM, justify="center")
