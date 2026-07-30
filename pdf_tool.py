@@ -64,9 +64,13 @@ def _apply_update(root, url):
         # cmd.exe + 배치파일로 자기 자신을 교체·재실행하는 방식은 일부 보안
         # 프로그램에서 악성코드의 자가 업데이트 패턴으로 오인해 DLL 로딩을
         # 막는 사례가 있어, PowerShell 로 교체 (앱 내 다른 곳과 동일한 방식)
+        # ─ 종료 직후에는 기존 프로세스가 파일을 잠시 붙잡고 있어 복사가
+        #   실패할 수 있으므로, 성공할 때까지 짧게 재시도한다 (실패한 채
+        #   그냥 예전 exe 를 재실행해버리는 것을 방지)
         ps_cmd = (
-            f"Start-Sleep -Seconds 2; "
-            f"Copy-Item -Path '{tmp_exe}' -Destination '{INSTALL_EXE}' -Force; "
+            f"for ($i=0; $i -lt 10; $i++) {{ "
+            f"try {{ Copy-Item -Path '{tmp_exe}' -Destination '{INSTALL_EXE}' -Force -ErrorAction Stop; break }} "
+            f"catch {{ Start-Sleep -Milliseconds 700 }} }}; "
             f"Start-Process -FilePath '{INSTALL_EXE}'"
         )
         subprocess.Popen(
@@ -1113,6 +1117,7 @@ class ConvertTab(tk.Frame):
         self.pcanvas.delete("all")
         cw = max(self.pcanvas.winfo_width(), 200)
         ch = max(self.pcanvas.winfo_height(), 100)
+        self.pcanvas.configure(scrollregion=(0,0,cw,ch))  # 빈 상태에서는 스크롤 불가
         self.pcanvas.create_text(cw//2, ch//2,
             text="PDF 또는 이미지를 위 드롭존에 넣으세요",
             font=FONT, fill=TEXT_DIM, justify="center")
@@ -1362,6 +1367,8 @@ class App(TkinterDnD.Tk if DND_OK else tk.Tk):
         hdr.pack(fill="x")
         tk.Label(hdr, text="  PDF 편집기", font=(FM,13,"bold"),
                  bg=PANEL, fg=TEXT).pack(side="left", pady=12)
+        tk.Label(hdr, text=f"v{VERSION}", font=FONT_S,
+                 bg=PANEL, fg=TEXT_DIM).pack(side="left", padx=(2,8), pady=12)
         flags = []
         if PREVIEW_OK: flags.append("미리보기 ✓")
         if DND_OK:     flags.append("드래그앤드롭 ✓")
