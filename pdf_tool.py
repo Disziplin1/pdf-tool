@@ -608,6 +608,15 @@ class OrganizeTab(tk.Frame):
             x0, y0 = self._card_xy(i)
             self._draw_card(i, x0, y0, pg)
 
+        # 드래그 중인 카드를 흐리게 + 테두리로 강조해 "지금 이걸 옮기는 중"
+        # 이라는 걸 명확히 표시 (커서만으로는 헷갈린다는 피드백 반영)
+        if self.drag_moved and self.drag_src is not None and self.drag_src < n:
+            sx0, sy0 = self._card_xy(self.drag_src)
+            self.canvas.create_rectangle(sx0, sy0, sx0+self.CW, sy0+self.CH,
+                fill=CARD, outline="", stipple="gray50", tags="drag")
+            rr(self.canvas, sx0-2, sy0-2, sx0+self.CW+2, sy0+self.CH+2,
+               r=16, fill="", outline=ACCENT, width=2, tags="drag")
+
         if insert_at is not None:
             cols2 = self._cols()
             col   = min(insert_at%cols2, cols2-1)
@@ -744,6 +753,8 @@ class OrganizeTab(tk.Frame):
 
     def _clear_hover(self, _=None):
         self.canvas.delete("hov"); self.hover_idx = None
+        if self.drag_src is None:
+            self.canvas.config(cursor="")
 
     def _on_hover(self, event):
         if self.drag_src is not None: return
@@ -754,6 +765,8 @@ class OrganizeTab(tk.Frame):
             self.canvas.delete("hov")
             self.hover_idx = idx
             if idx is not None: self._draw_hover_ol(idx)
+            # 카드 위에서는 "이동 가능" 커서로 드래그 가능함을 표시
+            self.canvas.config(cursor="fleur" if idx is not None else "")
 
     # ── 캔버스 이벤트 ────────────────────────────────────────
     def _on_press(self, event):
@@ -786,6 +799,8 @@ class OrganizeTab(tk.Frame):
     def _on_b1motion(self, event):
         if self.drag_src is None: return
         self.canvas.delete("hov"); self.hover_idx = None
+        if not self.drag_moved:
+            self.canvas.config(cursor="fleur")   # 드래그가 실제로 시작될 때 커서 전환
         self.drag_moved = True
         cx  = self.canvas.canvasx(event.x)
         cy  = self.canvas.canvasy(event.y)
@@ -806,6 +821,7 @@ class OrganizeTab(tk.Frame):
         # 단순 클릭은 아무 동작 없음 (미리보기는 🔍 버튼으로만)
         self.drag_src = self.drag_tgt = None
         self.drag_moved = False
+        self.canvas.config(cursor="")
         self._render()
 
     # ── 좌표 변환 ───────────────────────────────────────────
@@ -1160,6 +1176,13 @@ class ConvertTab(tk.Frame):
         for i, (thumb, label) in enumerate(zip(items, labels)):
             x0, y0 = self._img_card_xy(i)
             self._draw_card(i, x0, y0, thumb, label)
+        if (self.mode == "img2pdf" and self.img_drag_moved
+                and self.img_drag_src is not None and self.img_drag_src < n):
+            sx0, sy0 = self._img_card_xy(self.img_drag_src)
+            self.pcanvas.create_rectangle(sx0, sy0, sx0+self.ICW, sy0+self.ICH,
+                fill=CARD, outline="", stipple="gray50", tags="idrag")
+            rr(self.pcanvas, sx0-2, sy0-2, sx0+self.ICW+2, sy0+self.ICH+2,
+               r=14, fill="", outline=ACCENT, width=2, tags="idrag")
         if insert_at is not None and self.mode == "img2pdf":
             cols2 = self._img_cols()
             col   = min(insert_at%cols2, cols2-1)
@@ -1222,6 +1245,8 @@ class ConvertTab(tk.Frame):
 
     def _img_clear_hover(self, _=None):
         self.pcanvas.delete("ihov"); self.img_hover = None
+        if self.img_drag_src is None:
+            self.pcanvas.config(cursor="")
 
     def _img_on_hover(self, event):
         if self.mode != "img2pdf" or self.img_drag_src is not None: return
@@ -1232,6 +1257,7 @@ class ConvertTab(tk.Frame):
             self.pcanvas.delete("ihov")
             self.img_hover = idx
             if idx is not None: self._draw_hover(idx)
+            self.pcanvas.config(cursor="fleur" if idx is not None else "")
 
     def _img_on_press(self, event):
         if self.mode != "img2pdf": return
@@ -1251,6 +1277,8 @@ class ConvertTab(tk.Frame):
     def _img_on_b1motion(self, event):
         if self.img_drag_src is None: return
         self.pcanvas.delete("ihov"); self.img_hover = None
+        if not self.img_drag_moved:
+            self.pcanvas.config(cursor="fleur")
         self.img_drag_moved = True
         cx = self.pcanvas.canvasx(event.x)
         cy = self.pcanvas.canvasy(event.y)
@@ -1273,6 +1301,7 @@ class ConvertTab(tk.Frame):
                 self.img_thumbs.insert(tgt, t)
         self.img_drag_src = self.img_drag_tgt = None
         self.img_drag_moved = False
+        self.pcanvas.config(cursor="")
         self._render_preview()
 
     def _xy_to_card(self, cx, cy):
