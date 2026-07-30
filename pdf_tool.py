@@ -77,32 +77,22 @@ def _apply_update(root, url):
         tmp_exe = os.path.join(os.environ.get("TEMP", "C:\\Temp"), "PDF편집기_update.exe")
         urllib.request.urlretrieve(url, tmp_exe)
 
-        # cmd.exe + 배치파일로 자기 자신을 교체·재실행하는 방식은 일부 보안
-        # 프로그램에서 악성코드의 자가 업데이트 패턴으로 오인해 DLL 로딩을
-        # 막는 사례가 있어, PowerShell 로 교체 (앱 내 다른 곳과 동일한 방식)
-        # ─ 종료 직후에는 기존 프로세스가 파일을 잠시 붙잡고 있어 복사가
-        #   실패할 수 있으므로, 성공할 때까지 짧게 재시도한다 (실패한 채
-        #   그냥 예전 exe 를 재실행해버리는 것을 방지)
-        # 재실행된 exe가 곧바로 죽어버리는 경우(예: 백신 간섭 등으로 인한
-        # DLL 로딩 실패) 사용자가 원인 모를 에러창만 보게 되므로, 잠시 후
-        # 프로세스 생존 여부를 확인해 실패 시 수동 다운로드 안내를 띄운다.
-        latest_url = f"https://github.com/{GITHUB_REPO}/releases/latest"
+        # 여러 환경에서 "복사 직후 곧바로 재실행"하면 일부 PC에서 원인
+        # 불명의 DLL 로딩 실패가 재현되어(백신 간섭 등으로 추정되나 원인
+        # 특정 실패), 자동 재실행은 하지 않는다. 파일 교체만 하고 사용자가
+        # 직접 다시 열도록 안내한다 — 시간을 두고 여는 방식이 훨씬 안정적.
         ps_cmd = (
-            f"for ($i=0; $i -lt 10; $i++) {{ "
+            f"for ($i=0; $i -lt 15; $i++) {{ "
             f"try {{ Copy-Item -Path '{tmp_exe}' -Destination '{INSTALL_EXE}' -Force -ErrorAction Stop; break }} "
-            f"catch {{ Start-Sleep -Milliseconds 700 }} }}; "
-            f"Start-Process -FilePath '{INSTALL_EXE}'; "
-            f"Start-Sleep -Seconds 3; "
-            f"if (-not (Get-Process -Name 'PDF 편집기' -ErrorAction SilentlyContinue)) {{ "
-            f"Add-Type -AssemblyName System.Windows.Forms; "
-            f"[System.Windows.Forms.MessageBox]::Show("
-            f"'업데이트된 프로그램 실행에 실패했습니다.`n아래 주소에서 최신 버전을 직접 다운로드해 주세요.`n{latest_url}', "
-            f"'업데이트 실패') }}"
+            f"catch {{ Start-Sleep -Milliseconds 700 }} }}"
         )
         subprocess.Popen(
             ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd],
             creationflags=0x08000000, env=_clean_env()
         )
+        _mb.showinfo("업데이트 완료",
+            "업데이트가 완료되었습니다.\n프로그램을 종료하니, 잠시 후 다시 실행해 주세요.",
+            parent=root)
         root.destroy()
     except Exception as e:
         _mb.showerror("업데이트 오류", str(e), parent=root)
