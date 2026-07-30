@@ -1,45 +1,54 @@
 @echo off
+chcp 65001 >nul
 pushd "%~dp0"
 
 where gh >nul 2>nul
 if errorlevel 1 (
-    echo ERROR: GitHub CLI ¹Ì¼³Ä¡.
+    echo ERROR: GitHub CLI ë¯¸ì„¤ì¹˜.
     goto end
 )
 
 for /f %%a in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd.HHmm"') do set VER=%%a
-echo ¹öÀü: v%VER%
+echo ë²„ì „: v%VER%
 
-echo [1/4] VERSION ¾÷µ¥ÀÌÆ®...
+echo [1/6] VERSION ì—…ë°ì´íŠ¸...
 python update_version.py %VER%
 if errorlevel 1 goto err
 
-echo [2/4] Building EXE...
-taskkill /f /im "PDF ÆíÁı±â.exe" >nul 2>nul
+echo [2/6] ì‹¤í–‰ê¸°(launcher) ë¹Œë“œ...
+taskkill /f /im "PDF í¸ì§‘ê¸°.exe" >nul 2>nul
+python -m PyInstaller launcher.spec --clean --noconfirm
+if errorlevel 1 goto err_build
+
+echo [3/6] í”„ë¡œê·¸ë¨ ë¹Œë“œ(onedir)...
 python -m PyInstaller pdf_tool.spec --clean --noconfirm
 if errorlevel 1 goto err_build
 
-echo [3/4] ¼Ò½º GitHub Çª½Ã...
+echo [4/6] ë°°í¬ íŒ¨í‚¤ì§€ ìƒì„±...
+python deploy_helper.py package %VER%
+if errorlevel 1 goto err_build
+
+echo [5/6] ì†ŒìŠ¤ GitHub í‘¸ì‹œ...
 python deploy_helper.py git %VER%
 
-echo [4/4] EXE ¸±¸®Áî ¾÷·Îµå...
+echo [6/6] GitHub ë¦´ë¦¬ì¦ˆ ì—…ë¡œë“œ...
 python deploy_helper.py release %VER%
 if errorlevel 1 goto err_upload
 
 echo.
-echo ¿Ï·á!  v%VER%
+echo ì™„ë£Œ!  v%VER%
 goto end
 
 :err
-echo ERROR: VERSION ¾÷µ¥ÀÌÆ® ½ÇÆĞ
+echo ERROR: VERSION ì—…ë°ì´íŠ¸ ì‹¤íŒ¨
 goto end
 
 :err_build
-echo ERROR: ºôµå ½ÇÆĞ
+echo ERROR: ë¹Œë“œ ì‹¤íŒ¨
 goto end
 
 :err_upload
-echo ERROR: GitHub ¾÷·Îµå ½ÇÆĞ
+echo ERROR: GitHub ì—…ë¡œë“œ ì‹¤íŒ¨
 
 :end
 popd

@@ -3,45 +3,29 @@ PDF 도구  ·  무료 · 오프라인 · 완전 로컬
   ▸ 정리 탭  : 드래그 정렬 · 체크박스 · 호버 툴바 · 미리보기 + 편집
   ▸ 변환 탭  : PDF → 이미지 / 이미지 → PDF
 """
-import sys, os, shutil, subprocess, threading
+import os, shutil, subprocess, threading, zipfile
 
 VERSION = "20260730.1703"                       # 배포.bat 이 자동 업데이트
 GITHUB_REPO  = "Disziplin1/pdf-tool"
-INSTALL_DIR  = os.path.join(os.environ.get("LOCALAPPDATA", "C:\\Temp"), "PDF편집기")
-INSTALL_EXE  = os.path.join(INSTALL_DIR, "PDF 편집기.exe")
 
-# PyInstaller onefile 은 압축 해제 후 자기 자신을 재실행할 때 내부적으로
-# _MEIPASS2 환경변수로 "이미 해제됨"을 표시하는데, 이 변수가 자식 프로세스
-# (재실행되는 exe, 또는 그 exe를 실행하는 PowerShell 등)에 그대로 상속되면
-# 자식이 이미 사라진 부모의 임시 폴더에서 DLL을 찾으려다 실패한다.
-# 새 프로세스를 띄울 때는 이 변수를 제거한 환경을 넘겨준다.
+# 실행기(launcher.py)가 관리하는 설치 구조:
+#   INSTALL_DIR\PDF 편집기.exe   ← 실행기 (거의 안 바뀜, 고정 경로)
+#   INSTALL_DIR\current.txt     ← 현재 사용 중인 버전 문자열
+#   INSTALL_DIR\versions\<버전>\PDF 편집기.exe  ← 실제 프로그램(이 파일)
+INSTALL_DIR  = os.path.join(os.environ.get("LOCALAPPDATA", "C:\\Temp"), "PDF편집기")
+VERSIONS_DIR = os.path.join(INSTALL_DIR, "versions")
+CURRENT_FILE = os.path.join(INSTALL_DIR, "current.txt")
+LAUNCHER_EXE = os.path.join(INSTALL_DIR, "PDF 편집기.exe")
+
+
 def _clean_env():
     env = os.environ.copy()
     env.pop("_MEIPASS2", None)
-    # PyInstaller onefile 은 자기 DLL을 찾기 위해 PATH 에 자신의 압축
-    # 해제 임시 폴더(_MEIxxxxxx)를 추가해두는데, 이 값이 자식 프로세스에
-    # 상속되면 이미 곧 사라질 부모의 임시 폴더를 잘못 참조할 수 있다.
     if "PATH" in env:
         parts = [p for p in env["PATH"].split(os.pathsep) if "_MEI" not in p]
         env["PATH"] = os.pathsep.join(parts)
     return env
 
-# ── 로컬 설치 (첫 실행 시 AppData 에 설치) ──
-def _ensure_local():
-    if not getattr(sys, "frozen", False):
-        return
-    cur = os.path.normcase(os.path.abspath(sys.executable))
-    dst = os.path.normcase(os.path.abspath(INSTALL_EXE))
-    if cur == dst:
-        return  # 이미 로컬 설치본에서 실행 중
-
-    os.makedirs(INSTALL_DIR, exist_ok=True)
-    shutil.copy2(sys.executable, INSTALL_EXE)
-
-    subprocess.Popen([INSTALL_EXE], env=_clean_env())
-    sys.exit(0)
-
-_ensure_local()
 
 # ── GitHub 업데이트 확인 ──────────────────────────────────────
 def _check_update(root):
@@ -57,7 +41,7 @@ def _check_update(root):
                 return
             assets  = data.get("assets", [])
             dl_url  = next((a["browser_download_url"] for a in assets
-                            if a["name"].endswith(".exe")), None)
+                            if a["name"].endswith("_Update.zip")), None)
             if not dl_url:
                 return
             root.after(0, lambda: _offer_update(root, latest, dl_url))
@@ -68,31 +52,38 @@ def _check_update(root):
 def _offer_update(root, ver, url):
     from tkinter import messagebox as _mb
     if _mb.askyesno("업데이트", f"새 버전 v{ver} 이 있습니다.\n지금 업데이트 하시겠습니까?", parent=root):
-        _apply_update(root, url)
+        _apply_update(root, ver, url)
 
-def _apply_update(root, url):
+def _apply_update(root, ver, url):
     from tkinter import messagebox as _mb
     try:
         import urllib.request
-        tmp_exe = os.path.join(os.environ.get("TEMP", "C:\\Temp"), "PDF편집기_update.exe")
-        urllib.request.urlretrieve(url, tmp_exe)
+        tmp_zip = os.path.join(os.environ.get("TEMP", "C:\\Temp"), f"pdf_tool_update_{ver}.zip")
+        urllib.request.urlretrieve(url, tmp_zip)
 
-        # 여러 환경에서 "복사 직후 곧바로 재실행"하면 일부 PC에서 원인
-        # 불명의 DLL 로딩 실패가 재현되어(백신 간섭 등으로 추정되나 원인
-        # 특정 실패), 자동 재실행은 하지 않는다. 파일 교체만 하고 사용자가
-        # 직접 다시 열도록 안내한다 — 시간을 두고 여는 방식이 훨씬 안정적.
-        ps_cmd = (
-            f"for ($i=0; $i -lt 15; $i++) {{ "
-            f"try {{ Copy-Item -Path '{tmp_exe}' -Destination '{INSTALL_EXE}' -Force -ErrorAction Stop; break }} "
-            f"catch {{ Start-Sleep -Milliseconds 700 }} }}"
-        )
-        subprocess.Popen(
-            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd],
-            creationflags=0x08000000, env=_clean_env()
-        )
+        # 실행 중인 파일은 전혀 건드리지 않고, 완전히 새로운 버전 폴더에
+        # 압축을 푼다 — 파일 잠금/DLL 문제가 구조적으로 생길 수 없다.
+        new_dir = os.path.join(VERSIONS_DIR, ver)
+        if os.path.isdir(new_dir):
+            shutil.rmtree(new_dir)
+        os.makedirs(new_dir, exist_ok=True)
+        with zipfile.ZipFile(tmp_zip) as zf:
+            zf.extractall(new_dir)
+        os.remove(tmp_zip)
+
+        new_exe = os.path.join(new_dir, "PDF 편집기.exe")
+        if not os.path.isfile(new_exe):
+            raise RuntimeError("업데이트 파일 압축 해제에 실패했습니다.")
+
+        with open(CURRENT_FILE, "w", encoding="utf-8") as f:
+            f.write(ver)
+
         _mb.showinfo("업데이트 완료",
-            "업데이트가 완료되었습니다.\n프로그램을 종료하니, 잠시 후 다시 실행해 주세요.",
-            parent=root)
+            f"v{ver} 로 업데이트되었습니다.\n프로그램을 다시 시작합니다.", parent=root)
+
+        # 실행기(launcher)는 이번 업데이트로 바뀌지 않은 안정적인 파일이므로,
+        # 실행기를 통해 재실행하면 곧바로 열어도 문제가 없다.
+        subprocess.Popen([LAUNCHER_EXE], env=_clean_env())
         root.destroy()
     except Exception as e:
         _mb.showerror("업데이트 오류", str(e), parent=root)

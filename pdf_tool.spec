@@ -53,20 +53,22 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# ── onedir 빌드 ──────────────────────────────────────────
+# onefile 은 실행할 때마다 %TEMP%\_MEIxxxx 에 압축을 풀어 python313.dll
+# 등을 로드하는데, 이 과정이 일부 환경(백신 등)에서 실패하는 문제가
+# 있었다. onedir 로 바꾸면 이 임시 압축해제 과정 자체가 없어져서
+# 해당 문제가 구조적으로 발생할 수 없다. (실행기 launcher.py 가 버전
+# 폴더 구조로 관리한다.)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='PDF 편집기',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,          # UPX 압축 (없으면 자동 스킵)
-    upx_exclude=[],
-    runtime_tmpdir=None,
+    upx=True,
     console=False,     # 콘솔 창 없이 GUI 만 표시
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -74,4 +76,15 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=None,         # 아이콘 파일 경로 (예: 'icon.ico') 로 교체 가능
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='PDF 편집기',
 )
