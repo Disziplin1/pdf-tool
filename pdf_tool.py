@@ -18,6 +18,12 @@ INSTALL_EXE  = os.path.join(INSTALL_DIR, "PDF 편집기.exe")
 def _clean_env():
     env = os.environ.copy()
     env.pop("_MEIPASS2", None)
+    # PyInstaller onefile 은 자기 DLL을 찾기 위해 PATH 에 자신의 압축
+    # 해제 임시 폴더(_MEIxxxxxx)를 추가해두는데, 이 값이 자식 프로세스에
+    # 상속되면 이미 곧 사라질 부모의 임시 폴더를 잘못 참조할 수 있다.
+    if "PATH" in env:
+        parts = [p for p in env["PATH"].split(os.pathsep) if "_MEI" not in p]
+        env["PATH"] = os.pathsep.join(parts)
     return env
 
 # ── 로컬 설치 (첫 실행 시 AppData 에 설치) ──
@@ -1389,11 +1395,6 @@ class App(TkinterDnD.Tk if DND_OK else tk.Tk):
                  bg=PANEL, fg=TEXT).pack(side="left", pady=12)
         tk.Label(hdr, text=f"v{VERSION}", font=FONT_S,
                  bg=PANEL, fg=TEXT_DIM).pack(side="left", padx=(2,8), pady=12)
-        flags = []
-        if PREVIEW_OK: flags.append("미리보기 ✓")
-        if DND_OK:     flags.append("드래그앤드롭 ✓")
-        tk.Label(hdr, text="  ·  ".join(flags),
-                 font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(side="left", padx=8)
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
 
         # 탭 버튼 (선택 탭: Bold + 메인 컬러 배경 / 비선택: 연한 배경)
