@@ -10,6 +10,16 @@ GITHUB_REPO  = "Disziplin1/pdf-tool"
 INSTALL_DIR  = os.path.join(os.environ.get("LOCALAPPDATA", "C:\\Temp"), "PDF편집기")
 INSTALL_EXE  = os.path.join(INSTALL_DIR, "PDF 편집기.exe")
 
+# PyInstaller onefile 은 압축 해제 후 자기 자신을 재실행할 때 내부적으로
+# _MEIPASS2 환경변수로 "이미 해제됨"을 표시하는데, 이 변수가 자식 프로세스
+# (재실행되는 exe, 또는 그 exe를 실행하는 PowerShell 등)에 그대로 상속되면
+# 자식이 이미 사라진 부모의 임시 폴더에서 DLL을 찾으려다 실패한다.
+# 새 프로세스를 띄울 때는 이 변수를 제거한 환경을 넘겨준다.
+def _clean_env():
+    env = os.environ.copy()
+    env.pop("_MEIPASS2", None)
+    return env
+
 # ── 로컬 설치 (첫 실행 시 AppData 에 설치) ──
 def _ensure_local():
     if not getattr(sys, "frozen", False):
@@ -22,7 +32,7 @@ def _ensure_local():
     os.makedirs(INSTALL_DIR, exist_ok=True)
     shutil.copy2(sys.executable, INSTALL_EXE)
 
-    subprocess.Popen([INSTALL_EXE])
+    subprocess.Popen([INSTALL_EXE], env=_clean_env())
     sys.exit(0)
 
 _ensure_local()
@@ -67,15 +77,25 @@ def _apply_update(root, url):
         # ─ 종료 직후에는 기존 프로세스가 파일을 잠시 붙잡고 있어 복사가
         #   실패할 수 있으므로, 성공할 때까지 짧게 재시도한다 (실패한 채
         #   그냥 예전 exe 를 재실행해버리는 것을 방지)
+        # 재실행된 exe가 곧바로 죽어버리는 경우(예: 백신 간섭 등으로 인한
+        # DLL 로딩 실패) 사용자가 원인 모를 에러창만 보게 되므로, 잠시 후
+        # 프로세스 생존 여부를 확인해 실패 시 수동 다운로드 안내를 띄운다.
+        latest_url = f"https://github.com/{GITHUB_REPO}/releases/latest"
         ps_cmd = (
             f"for ($i=0; $i -lt 10; $i++) {{ "
             f"try {{ Copy-Item -Path '{tmp_exe}' -Destination '{INSTALL_EXE}' -Force -ErrorAction Stop; break }} "
             f"catch {{ Start-Sleep -Milliseconds 700 }} }}; "
-            f"Start-Process -FilePath '{INSTALL_EXE}'"
+            f"Start-Process -FilePath '{INSTALL_EXE}'; "
+            f"Start-Sleep -Seconds 3; "
+            f"if (-not (Get-Process -Name 'PDF 편집기' -ErrorAction SilentlyContinue)) {{ "
+            f"Add-Type -AssemblyName System.Windows.Forms; "
+            f"[System.Windows.Forms.MessageBox]::Show("
+            f"'업데이트된 프로그램 실행에 실패했습니다.`n아래 주소에서 최신 버전을 직접 다운로드해 주세요.`n{latest_url}', "
+            f"'업데이트 실패') }}"
         )
         subprocess.Popen(
             ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd],
-            creationflags=0x08000000
+            creationflags=0x08000000, env=_clean_env()
         )
         root.destroy()
     except Exception as e:
