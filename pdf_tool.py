@@ -61,14 +61,18 @@ def _apply_update(root, url):
         tmp_exe = os.path.join(os.environ.get("TEMP", "C:\\Temp"), "PDF편집기_update.exe")
         urllib.request.urlretrieve(url, tmp_exe)
 
-        bat = os.path.join(os.environ.get("TEMP", "C:\\Temp"), "pdf_update.bat")
-        with open(bat, "w", encoding="cp949") as f:
-            f.write("@echo off\n")
-            f.write("timeout /t 2 /nobreak >nul\n")
-            f.write(f'copy /y "{tmp_exe}" "{INSTALL_EXE}"\n')
-            f.write(f'start "" "{INSTALL_EXE}"\n')
-            f.write('del "%~f0"\n')
-        subprocess.Popen(["cmd", "/c", bat], creationflags=0x08000000)
+        # cmd.exe + 배치파일로 자기 자신을 교체·재실행하는 방식은 일부 보안
+        # 프로그램에서 악성코드의 자가 업데이트 패턴으로 오인해 DLL 로딩을
+        # 막는 사례가 있어, PowerShell 로 교체 (앱 내 다른 곳과 동일한 방식)
+        ps_cmd = (
+            f"Start-Sleep -Seconds 2; "
+            f"Copy-Item -Path '{tmp_exe}' -Destination '{INSTALL_EXE}' -Force; "
+            f"Start-Process -FilePath '{INSTALL_EXE}'"
+        )
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_cmd],
+            creationflags=0x08000000
+        )
         root.destroy()
     except Exception as e:
         _mb.showerror("업데이트 오류", str(e), parent=root)
