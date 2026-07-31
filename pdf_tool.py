@@ -3,7 +3,7 @@ PDF 도구  ·  무료 · 오프라인 · 완전 로컬
   ▸ 정리 탭  : 드래그 정렬 · 체크박스 · 호버 툴바 · 미리보기 + 편집
   ▸ 변환 탭  : PDF → 이미지 / 이미지 → PDF
 """
-import os, shutil, subprocess, threading, zipfile
+import sys, os, shutil, subprocess, threading, zipfile
 
 VERSION = "20260731.1035"                       # 배포.bat 이 자동 업데이트
 GITHUB_REPO  = "Disziplin1/pdf-tool"
@@ -16,6 +16,11 @@ INSTALL_DIR  = os.path.join(os.environ.get("LOCALAPPDATA", "C:\\Temp"), "PDF편�
 VERSIONS_DIR = os.path.join(INSTALL_DIR, "versions")
 CURRENT_FILE = os.path.join(INSTALL_DIR, "current.txt")
 LAUNCHER_EXE = os.path.join(INSTALL_DIR, "PDF 편집기.exe")
+
+def _resource_path(name):
+    # PyInstaller onedir 은 exe 옆(onedir 구조에서는 _internal 폴더)에서 데이터 파일을 찾음
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
 
 
 def _clean_env():
@@ -1475,6 +1480,10 @@ class App(TkinterDnD.Tk if DND_OK else tk.Tk):
         w,h   = min(1040,sw-60), min(780,sh-60)
         self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
         self.minsize(780,580); self.configure(bg=BG)
+        try:
+            self.iconbitmap(default=_resource_path("icon.ico"))
+        except Exception:
+            pass
         self._build()
         self.after(3000, lambda: _check_update(self))  # 3초 후 백그라운드 업데이트 확인
 

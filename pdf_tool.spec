@@ -20,7 +20,7 @@ a = Analysis(
     ['pdf_tool.py'],
     pathex=['.'],
     binaries=[],
-    datas=dnd_datas,
+    datas=dnd_datas + [('icon.ico', '.')],
     hiddenimports=[
         'tkinterdnd2',
         'PIL._tkinter_finder',
@@ -75,7 +75,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,         # 아이콘 파일 경로 (예: 'icon.ico') 로 교체 가능
+    icon='icon.ico',
 )
 
 coll = COLLECT(
