@@ -1,5 +1,8 @@
 @echo off
 chcp 65001 >nul
+goto :main
+
+:main
 pushd "%~dp0"
 
 where gh >nul 2>nul
