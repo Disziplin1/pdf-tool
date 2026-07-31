@@ -554,6 +554,8 @@ class OrganizeTab(tk.Frame):
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.canvas.bind("<MouseWheel>",
                          lambda e: self.canvas.yview_scroll(-1*(e.delta//120), "units"))
+        self.canvas.bind("<Control-MouseWheel>",
+                         lambda e: self._zoom(1.1 if e.delta > 0 else 1/1.1))
 
         if DND_OK:
             for w in (self, self.canvas):
