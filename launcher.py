@@ -65,7 +65,13 @@ def _launch_current():
     if not os.path.isfile(app_exe):
         _fail(f"버전 {ver} 실행 파일을 찾을 수 없습니다.\n프로그램을 다시 다운로드해 주세요.")
         return
-    subprocess.Popen([app_exe], env=_clean_env())
+    # 창 모드(콘솔 없음) 빌드는 sys.stdin/stdout/stderr 가 없어서, 자식
+    # 프로세스에 표준 입출력을 그대로 상속시키려다 문제가 생기는 걸
+    # 방지하기 위해 명시적으로 끊어준다.
+    subprocess.Popen(
+        [app_exe], env=_clean_env(),
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
 
 
 if __name__ == "__main__":
