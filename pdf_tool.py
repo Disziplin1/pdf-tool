@@ -476,6 +476,7 @@ class OrganizeTab(tk.Frame):
         self.pages     = []
         self.checked   = set()
         self.photos    = []
+        self.ghost_photos = []   # 드래그 중 마우스를 따라다니는 미리보기용
         self.scale     = 1.0
         self.drag_src  = None
         self.drag_tgt  = None
@@ -806,10 +807,40 @@ class OrganizeTab(tk.Frame):
         cy  = self.canvas.canvasy(event.y)
         tgt = self._xy_to_insert(cx, cy)
         if tgt != self.drag_tgt:
-            self.drag_tgt = tgt; self._render(insert_at=tgt)
+            self.drag_tgt = tgt; self._render(insert_at=tgt)   # 격자 재배치는 목표 칸이 바뀔 때만 (부드러움 유지)
+        self._draw_ghost(cx, cy)   # 카드 미리보기는 매 프레임 마우스를 그대로 따라감
         h = self.canvas.winfo_height()
         if event.y < 50:     self.canvas.yview_scroll(-1,"units")
         elif event.y > h-50: self.canvas.yview_scroll( 1,"units")
+
+    def _draw_ghost(self, cx, cy):
+        """드래그 중인 카드를 마우스 위치에 작게 띄워 '들고 있는' 느낌을 준다."""
+        self.canvas.delete("ghost")
+        self.ghost_photos.clear()
+        if self.drag_src is None or self.drag_src >= len(self.pages): return
+        pg = self.pages[self.drag_src]
+        gw, gh = int(self.CW*0.72), int(self.CH*0.72)
+        x0, y0 = cx-gw//2, cy-gh//2
+        for d, col in [(6,SH1),(3,SH2)]:
+            rr(self.canvas, x0+d, y0+d, x0+gw+d, y0+gh+d,
+               r=12, fill=col, outline="", tags="ghost")
+        rr(self.canvas, x0, y0, x0+gw, y0+gh,
+           r=12, fill=CARD, outline=ACCENT, width=2, tags="ghost")
+        pil = pg.get("pil")
+        if pil:
+            d   = pil.copy()
+            rot = pg.get("rot", 0)
+            if rot: d = d.rotate(-rot, expand=True)
+            pad = 8
+            sc  = min((gw-pad*2)/d.width, (gh-pad*2)/d.height)
+            nw, nh = max(1,int(d.width*sc)), max(1,int(d.height*sc))
+            d = d.resize((nw, nh), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(d)
+            self.ghost_photos.append(photo)
+            self.canvas.create_image(cx, cy, image=photo, tags="ghost")
+        else:
+            self.canvas.create_text(cx, cy, text="PDF", font=FONT_B,
+                                    fill=TEXT_DIM, tags="ghost")
 
     def _on_release(self, event):
         if self.drag_src is None: return
@@ -949,6 +980,7 @@ class ConvertTab(tk.Frame):
         self.img_files      = []
         self.img_thumbs     = []          # PIL (이미지 파일)
         self.img_photos     = []          # PhotoImage 레퍼런스
+        self.img_ghost_photos = []        # 드래그 중 마우스를 따라다니는 미리보기용
         self.img_hover      = None
         self.img_drag_src   = None
         self.img_drag_tgt   = None
@@ -1285,9 +1317,36 @@ class ConvertTab(tk.Frame):
         tgt = self._xy_to_insert(cx, cy)
         if tgt != self.img_drag_tgt:
             self.img_drag_tgt = tgt; self._render_preview(insert_at=tgt)
+        self._img_draw_ghost(cx, cy)
         h = self.pcanvas.winfo_height()
         if event.y < 40:     self.pcanvas.yview_scroll(-1,"units")
         elif event.y > h-40: self.pcanvas.yview_scroll( 1,"units")
+
+    def _img_draw_ghost(self, cx, cy):
+        """드래그 중인 이미지를 마우스 위치에 작게 띄워 '들고 있는' 느낌을 준다."""
+        self.pcanvas.delete("ighost")
+        self.img_ghost_photos.clear()
+        if self.img_drag_src is None or self.img_drag_src >= len(self.img_thumbs): return
+        thumb = self.img_thumbs[self.img_drag_src]
+        gw, gh = int(self.ICW*0.72), int(self.ICH*0.72)
+        x0, y0 = cx-gw//2, cy-gh//2
+        for d, col in [(5,SH1),(3,SH2)]:
+            rr(self.pcanvas, x0+d, y0+d, x0+gw+d, y0+gh+d,
+               r=10, fill=col, outline="", tags="ighost")
+        rr(self.pcanvas, x0, y0, x0+gw, y0+gh,
+           r=10, fill=CARD, outline=ACCENT, width=2, tags="ighost")
+        if thumb:
+            pad = 6
+            sc  = min((gw-pad*2)/thumb.width, (gh-pad*2)/thumb.height)
+            nw, nh = max(1,int(thumb.width*sc)), max(1,int(thumb.height*sc))
+            img = thumb.resize((nw, nh), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+            self.img_ghost_photos.append(photo)
+            self.pcanvas.create_image(cx, cy, image=photo, tags="ighost")
+        else:
+            icon = "📄" if self.mode == "pdf2img" else "🖼"
+            self.pcanvas.create_text(cx, cy, text=icon,
+                font=("Segoe UI Emoji",18), fill=TEXT_DIM, tags="ighost")
 
     def _img_on_release(self, event):
         if self.img_drag_src is None: return
