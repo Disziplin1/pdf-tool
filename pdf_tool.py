@@ -179,16 +179,18 @@ def parse_paths(data: str) -> list:
     return out
 
 
-def make_thumb(path, pidx, tw, th):
+def make_thumb(path, pidx, tw, th, factor=2.5):
+    """factor: tw×th 기준 몇 배 해상도로 캐싱할지. 카드 확대(줌인) 시에도
+    미리 캐싱해둔 이미지를 다시 늘려 흐려지지 않도록 여유 있게 렌더링한다."""
     if not PREVIEW_OK: return None
     try:
         doc  = fitz.open(path)
         if pidx >= len(doc): return None
         page = doc[pidx]
-        sc   = min(tw/page.rect.width, th/page.rect.height) * 2
+        sc   = min(tw/page.rect.width, th/page.rect.height) * factor
         pix  = page.get_pixmap(matrix=fitz.Matrix(sc, sc), alpha=False)
         img  = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        img.thumbnail((tw, th), Image.LANCZOS)
+        img.thumbnail((int(tw*factor), int(th*factor)), Image.LANCZOS)
         doc.close()
         return img
     except Exception:
