@@ -599,33 +599,40 @@ class OrganizeTab(tk.Frame):
             if self.status_cb: self.status_cb(0, 0, 0)
             return
 
-        cols    = self._cols()
-        rows    = (n+cols-1)//cols
+        cols     = self._cols()
+        dragging = insert_at is not None and self.drag_src is not None
+
+        if dragging:
+            # 드래그 중: 옮기는 카드는 목록에서 빼고, 놓일 자리에 빈 칸을
+            # 만들어서 나머지 카드들이 그 칸을 향해 앞뒤로 밀리는 것처럼
+            # 보이게 배치한다 (옮기는 카드 자체는 마우스를 따라다니는
+            # 미리보기(_draw_ghost)로만 표시).
+            order = [i for i in range(n) if i != self.drag_src]
+            gap = insert_at - (1 if insert_at > self.drag_src else 0)
+            gap = max(0, min(gap, len(order)))
+            display = order[:gap] + [None] + order[gap:]
+        else:
+            display = list(range(n))
+
+        rows    = (len(display)+cols-1)//cols
         total_h = self.PAD + rows*(self.CH+self.PAD)
         cw      = max(self.canvas.winfo_width(), 1)
         self.canvas.configure(scrollregion=(0,0,cw,max(total_h,self.canvas.winfo_height())))
 
-        for i, pg in enumerate(self.pages):
-            x0, y0 = self._card_xy(i)
-            self._draw_card(i, x0, y0, pg)
+        gap_xy = None
+        for slot, pi in enumerate(display):
+            x0, y0 = self._card_xy(slot)
+            if pi is None:
+                gap_xy = (x0, y0)
+                continue
+            self._draw_card(pi, x0, y0, self.pages[pi])
 
-        # 드래그 중인 카드를 흐리게 + 테두리로 강조해 "지금 이걸 옮기는 중"
-        # 이라는 걸 명확히 표시 (커서만으로는 헷갈린다는 피드백 반영)
-        if self.drag_moved and self.drag_src is not None and self.drag_src < n:
-            sx0, sy0 = self._card_xy(self.drag_src)
-            self.canvas.create_rectangle(sx0, sy0, sx0+self.CW, sy0+self.CH,
-                fill=CARD, outline="", stipple="gray50", tags="drag")
-            rr(self.canvas, sx0-2, sy0-2, sx0+self.CW+2, sy0+self.CH+2,
-               r=16, fill="", outline=ACCENT, width=2, tags="drag")
-
-        if insert_at is not None:
-            cols2 = self._cols()
-            col   = min(insert_at%cols2, cols2-1)
-            row   = insert_at//cols2
-            lx    = self.PAD + col*(self.CW+self.PAD) - self.PAD//2
-            ly0   = self.PAD + row*(self.CH+self.PAD) - 4
-            self.canvas.create_line(lx, ly0, lx, ly0+self.CH+8,
-                                    fill=INSLINE, width=3, tags="ins")
+        if gap_xy is not None:
+            x0, y0 = gap_xy
+            rr(self.canvas, x0+2, y0+2, x0+self.CW-2, y0+self.CH-2,
+               r=12, fill=CARD_CHK, outline="", tags="ins")
+            rr(self.canvas, x0, y0, x0+self.CW, y0+self.CH,
+               r=14, fill="", outline=ACCENT, width=2, tags="ins")
 
         if self.hover_idx is not None and self.hover_idx < n:
             self._draw_hover_ol(self.hover_idx)
@@ -1199,30 +1206,41 @@ class ConvertTab(tk.Frame):
             labels = [os.path.basename(p) for p in self.img_files]
         n = len(items)
         if n == 0: self._draw_hint(); return
-        cols    = self._img_cols()
-        rows    = (n+cols-1)//cols
+        cols     = self._img_cols()
+        dragging = (self.mode == "img2pdf" and insert_at is not None
+                    and self.img_drag_src is not None)
+
+        if dragging:
+            # 옮기는 이미지는 목록에서 빼고 놓일 자리에 빈 칸을 만들어
+            # 나머지 카드들이 밀리는 것처럼 보이게 배치 (정리 탭과 동일)
+            order = [i for i in range(n) if i != self.img_drag_src]
+            gap = insert_at - (1 if insert_at > self.img_drag_src else 0)
+            gap = max(0, min(gap, len(order)))
+            display = order[:gap] + [None] + order[gap:]
+        else:
+            display = list(range(n))
+
+        rows    = (len(display)+cols-1)//cols
         total_h = self.IPAD + rows*(self.ICH+self.IPAD)
         cw      = max(self.pcanvas.winfo_width(), 1)
         self.pcanvas.configure(
             scrollregion=(0,0,cw,max(total_h,self.pcanvas.winfo_height())))
-        for i, (thumb, label) in enumerate(zip(items, labels)):
-            x0, y0 = self._img_card_xy(i)
-            self._draw_card(i, x0, y0, thumb, label)
-        if (self.mode == "img2pdf" and self.img_drag_moved
-                and self.img_drag_src is not None and self.img_drag_src < n):
-            sx0, sy0 = self._img_card_xy(self.img_drag_src)
-            self.pcanvas.create_rectangle(sx0, sy0, sx0+self.ICW, sy0+self.ICH,
-                fill=CARD, outline="", stipple="gray50", tags="idrag")
-            rr(self.pcanvas, sx0-2, sy0-2, sx0+self.ICW+2, sy0+self.ICH+2,
-               r=14, fill="", outline=ACCENT, width=2, tags="idrag")
-        if insert_at is not None and self.mode == "img2pdf":
-            cols2 = self._img_cols()
-            col   = min(insert_at%cols2, cols2-1)
-            row   = insert_at//cols2
-            lx    = self.IPAD + col*(self.ICW+self.IPAD) - self.IPAD//2
-            ly0   = self.IPAD + row*(self.ICH+self.IPAD) - 4
-            self.pcanvas.create_line(lx, ly0, lx, ly0+self.ICH+8,
-                                     fill=INSLINE, width=3, tags="iins")
+
+        gap_xy = None
+        for slot, pi in enumerate(display):
+            x0, y0 = self._img_card_xy(slot)
+            if pi is None:
+                gap_xy = (x0, y0)
+                continue
+            self._draw_card(pi, x0, y0, items[pi], labels[pi])
+
+        if gap_xy is not None:
+            x0, y0 = gap_xy
+            rr(self.pcanvas, x0+2, y0+2, x0+self.ICW-2, y0+self.ICH-2,
+               r=10, fill=CARD_CHK, outline="", tags="iins")
+            rr(self.pcanvas, x0, y0, x0+self.ICW, y0+self.ICH,
+               r=12, fill="", outline=ACCENT, width=2, tags="iins")
+
         if self.img_hover is not None and self.img_hover < n:
             self._draw_hover(self.img_hover)
 
