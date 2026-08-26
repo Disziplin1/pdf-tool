@@ -94,7 +94,7 @@ def _apply_update(root, ver, url):
         _mb.showerror("업데이트 오류", str(e), parent=root)
 
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 import os, itertools
 from pypdf import PdfReader, PdfWriter
 
@@ -142,6 +142,12 @@ FONT_SB= (FM, 11, "bold")   # Semi Bold 대체 (탭용)
 FONT_H = (FM, 14, "bold")
 FONT_S = (FM, 9)
 FONT_XS= (FM, 8)
+
+# 텍스트 annot 기본값 (Phase 3 에서 만든 annot 에는 이 필드들이 없을 수
+# 있으므로, 항상 .get(key, DEFAULT_*) 형태로 읽어 하위 호환을 유지한다)
+DEFAULT_ANNOT_FONT  = FM
+DEFAULT_ANNOT_SIZE  = 14.0     # pt
+DEFAULT_ANNOT_COLOR = ACCENT
 
 
 # ══════════════════════════════════════════════════════════
@@ -293,6 +299,229 @@ def screen_to_pdf(px, py, page_w_pt, page_h_pt, rot, scale, cx, cy):
 
 
 # ══════════════════════════════════════════════════════════
+#  텍스트 속성 패널 (PreviewWin 우측에 붙는다, 선택 시에만 표시)
+# ══════════════════════════════════════════════════════════
+class TextPropPanel(tk.Frame):
+    ALIGN_CHOICES = [("좌측", "left"), ("가운데", "center"), ("우측", "right")]
+
+    def __init__(self, master, owner):
+        super().__init__(master, bg="#1e0c44", width=230)
+        self.owner = owner          # PreviewWin 인스턴스 (변경 통지용)
+        self.annot = None
+        self.pack_propagate(False)  # 내용과 무관하게 폭 고정
+        self._build()
+
+    def _build(self):
+        pad = dict(padx=14)
+        tk.Label(self, text="텍스트 속성", font=FONT_B, bg="#1e0c44", fg="#e0d0ff")\
+            .pack(anchor="w", padx=14, pady=(12,4))
+        tk.Frame(self, bg="#3a2a5a", height=1).pack(fill="x", padx=14, pady=(0,8))
+
+        # ── 내용 ──────────────────────────────────────────
+        tk.Label(self, text="내용", font=FONT_S, bg="#1e0c44", fg="#c8a8ff").pack(anchor="w", **pad)
+        self.text_var = tk.StringVar()
+        e_text = tk.Entry(self, textvariable=self.text_var, font=FONT, bg="white", fg="#222")
+        e_text.pack(fill="x", padx=14, pady=(2,8))
+        e_text.bind("<Return>", lambda e: self._apply_text())
+        e_text.bind("<FocusOut>", lambda e: self._apply_text())
+
+        # ── 위치 (X/Y, mm) ───────────────────────────────
+        tk.Label(self, text="위치 (기준: 페이지 좌측 상단)", font=FONT_S,
+                 bg="#1e0c44", fg="#c8a8ff").pack(anchor="w", padx=14, pady=(4,2))
+
+        xrow = tk.Frame(self, bg="#1e0c44"); xrow.pack(fill="x", padx=14)
+        tk.Label(xrow, text="X", font=FONT_S, bg="#1e0c44", fg="#e0d0ff", width=2).pack(side="left")
+        self.x_var = tk.StringVar()
+        e_x = tk.Entry(xrow, textvariable=self.x_var, font=FONT, width=9, bg="white", fg="#222")
+        e_x.pack(side="left")
+        tk.Label(xrow, text="mm", font=FONT_XS, bg="#1e0c44", fg="#9a8ab8").pack(side="left", padx=(4,0))
+        e_x.bind("<Return>", lambda e: self._apply_xy())
+        e_x.bind("<FocusOut>", lambda e: self._apply_xy())
+
+        yrow = tk.Frame(self, bg="#1e0c44"); yrow.pack(fill="x", padx=14, pady=(4,4))
+        tk.Label(yrow, text="Y", font=FONT_S, bg="#1e0c44", fg="#e0d0ff", width=2).pack(side="left")
+        self.y_var = tk.StringVar()
+        e_y = tk.Entry(yrow, textvariable=self.y_var, font=FONT, width=9, bg="white", fg="#222")
+        e_y.pack(side="left")
+        tk.Label(yrow, text="mm", font=FONT_XS, bg="#1e0c44", fg="#9a8ab8").pack(side="left", padx=(4,0))
+        e_y.bind("<Return>", lambda e: self._apply_xy())
+        e_y.bind("<FocusOut>", lambda e: self._apply_xy())
+
+        self.page_size_lbl = tk.Label(self, text="", font=FONT_XS, bg="#1e0c44", fg="#7a6a98")
+        self.page_size_lbl.pack(anchor="w", padx=14, pady=(2,8))
+
+        # ── 글꼴 ──────────────────────────────────────────
+        tk.Label(self, text="글꼴", font=FONT_S, bg="#1e0c44", fg="#c8a8ff").pack(anchor="w", **pad)
+        self.font_var = tk.StringVar()
+        self.font_combo = ttk.Combobox(self, textvariable=self.font_var, values=self._font_list(),
+                                        state="readonly", font=FONT_S)
+        self.font_combo.pack(fill="x", padx=14, pady=(2,8))
+        self.font_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_font())
+
+        # ── 크기 ──────────────────────────────────────────
+        tk.Label(self, text="크기 (pt)", font=FONT_S, bg="#1e0c44", fg="#c8a8ff").pack(anchor="w", **pad)
+        self.size_var = tk.StringVar()
+        e_size = tk.Entry(self, textvariable=self.size_var, font=FONT, width=9, bg="white", fg="#222")
+        e_size.pack(anchor="w", padx=14, pady=(2,8))
+        e_size.bind("<Return>", lambda e: self._apply_size())
+        e_size.bind("<FocusOut>", lambda e: self._apply_size())
+
+        # ── 색상 ──────────────────────────────────────────
+        crow = tk.Frame(self, bg="#1e0c44"); crow.pack(fill="x", padx=14, pady=(0,8))
+        tk.Label(crow, text="색상", font=FONT_S, bg="#1e0c44", fg="#c8a8ff").pack(side="left")
+        self.color_btn = tk.Button(crow, text="   ", bg=DEFAULT_ANNOT_COLOR, width=4,
+                                    relief="flat", bd=1, cursor="hand2", command=self._pick_color)
+        self.color_btn.pack(side="left", padx=8)
+
+        # ── 굵게 / 기울임 ─────────────────────────────────
+        birow = tk.Frame(self, bg="#1e0c44"); birow.pack(fill="x", padx=10, pady=(0,8))
+        self.bold_var = tk.BooleanVar()
+        self.italic_var = tk.BooleanVar()
+        tk.Checkbutton(birow, text="굵게", variable=self.bold_var, command=self._apply_style,
+                       bg="#1e0c44", fg="#e0d0ff", selectcolor="#2e1a55",
+                       activebackground="#1e0c44", font=FONT_S, bd=0,
+                       highlightthickness=0).pack(side="left", padx=4)
+        tk.Checkbutton(birow, text="기울임", variable=self.italic_var, command=self._apply_style,
+                       bg="#1e0c44", fg="#e0d0ff", selectcolor="#2e1a55",
+                       activebackground="#1e0c44", font=FONT_S, bd=0,
+                       highlightthickness=0).pack(side="left", padx=4)
+
+        # ── 정렬 ──────────────────────────────────────────
+        tk.Label(self, text="정렬", font=FONT_S, bg="#1e0c44", fg="#c8a8ff").pack(anchor="w", **pad)
+        self.align_var = tk.StringVar()
+        self.align_combo = ttk.Combobox(
+            self, textvariable=self.align_var,
+            values=[label for label, _ in self.ALIGN_CHOICES],
+            state="readonly", font=FONT_S)
+        self.align_combo.pack(fill="x", padx=14, pady=(2,8))
+        self.align_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_align())
+
+        # ── 회전 (텍스트 자체 회전 — 페이지 회전과 별개) ──
+        tk.Label(self, text="회전 (°)", font=FONT_S, bg="#1e0c44", fg="#c8a8ff").pack(anchor="w", **pad)
+        self.rot_var = tk.StringVar()
+        e_rot = tk.Entry(self, textvariable=self.rot_var, font=FONT, width=9, bg="white", fg="#222")
+        e_rot.pack(anchor="w", padx=14, pady=(2,8))
+        e_rot.bind("<Return>", lambda e: self._apply_rotation())
+        e_rot.bind("<FocusOut>", lambda e: self._apply_rotation())
+
+    def _font_list(self):
+        try:
+            from tkinter import font as tkfont
+            names = sorted(set(tkfont.families(self)))
+            return names if names else [DEFAULT_ANNOT_FONT]
+        except Exception:
+            return [DEFAULT_ANNOT_FONT]
+
+    # ── annot 표시 ────────────────────────────────────────
+    def show_annot(self, annot, page_w_pt, page_h_pt):
+        self.annot = annot
+        if annot is None:
+            return
+        self.text_var.set(annot.get("text", ""))
+        self.x_var.set(f"{pt_to_mm(annot['x']):.2f}")
+        self.y_var.set(f"{pt_to_mm(annot['y']):.2f}")
+        font_name = annot.get("font", DEFAULT_ANNOT_FONT)
+        self.font_var.set(font_name if font_name in self.font_combo["values"] else DEFAULT_ANNOT_FONT)
+        self.size_var.set(f"{annot.get('font_size', DEFAULT_ANNOT_SIZE):.2f}")
+        self.bold_var.set(bool(annot.get("bold", False)))
+        self.italic_var.set(bool(annot.get("italic", False)))
+        align_key = annot.get("align", "left")
+        label = next((lbl for lbl, val in self.ALIGN_CHOICES if val == align_key), "좌측")
+        self.align_var.set(label)
+        self.rot_var.set(f"{annot.get('rotation', 0.0):.1f}")
+        color = annot.get("color", DEFAULT_ANNOT_COLOR)
+        try: self.color_btn.config(bg=color)
+        except Exception: pass
+        if page_w_pt and page_h_pt:
+            self.page_size_lbl.config(
+                text=f"페이지 크기: {pt_to_mm(page_w_pt):.2f} × {pt_to_mm(page_h_pt):.2f} mm")
+        else:
+            self.page_size_lbl.config(text="")
+
+    def refresh_xy_only(self):
+        """드래그 등으로 좌표만 바뀌었을 때, 입력 포커스를 방해하지 않고
+        X/Y 표시만 갱신한다 (양방향 동기화, 8번 요구사항)."""
+        if self.annot is None: return
+        self.x_var.set(f"{pt_to_mm(self.annot['x']):.2f}")
+        self.y_var.set(f"{pt_to_mm(self.annot['y']):.2f}")
+
+    # ── 각 필드 적용 (Enter / 포커스 아웃 시점에 반영) ───────
+    def _apply_text(self):
+        if self.annot is None: return
+        self.annot["text"] = self.text_var.get()
+        self.owner._on_annot_prop_changed()
+
+    def _apply_xy(self):
+        if self.annot is None: return
+        try:
+            x_mm = float(self.x_var.get())
+            y_mm = float(self.y_var.get())
+        except ValueError:
+            messagebox.showwarning("잘못된 값", "X/Y 는 숫자(mm)로 입력해주세요.", parent=self)
+            self.refresh_xy_only()
+            return
+        # 내부 저장은 항상 pt, 정밀도를 그대로 유지한다 (화면 표시만 반올림)
+        self.annot["x"] = mm_to_pt(x_mm)
+        self.annot["y"] = mm_to_pt(y_mm)
+        self.refresh_xy_only()
+        self.owner._on_annot_prop_changed()
+
+    def _apply_size(self):
+        if self.annot is None: return
+        try:
+            size = float(self.size_var.get())
+            if size <= 0: raise ValueError
+        except ValueError:
+            messagebox.showwarning("잘못된 값", "크기는 0보다 큰 숫자(pt)로 입력해주세요.", parent=self)
+            self.size_var.set(f"{self.annot.get('font_size', DEFAULT_ANNOT_SIZE):.2f}")
+            return
+        self.annot["font_size"] = size
+        self.size_var.set(f"{size:.2f}")
+        self.owner._on_annot_prop_changed()
+
+    def _apply_rotation(self):
+        if self.annot is None: return
+        try:
+            rot = float(self.rot_var.get())
+        except ValueError:
+            messagebox.showwarning("잘못된 값", "회전 값은 숫자(도)로 입력해주세요.", parent=self)
+            self.rot_var.set(f"{self.annot.get('rotation', 0.0):.1f}")
+            return
+        rot = rot % 360
+        self.annot["rotation"] = rot
+        self.rot_var.set(f"{rot:.1f}")
+        self.owner._on_annot_prop_changed()
+
+    def _apply_font(self):
+        if self.annot is None: return
+        self.annot["font"] = self.font_var.get() or DEFAULT_ANNOT_FONT
+        self.owner._on_annot_prop_changed()
+
+    def _apply_style(self):
+        if self.annot is None: return
+        self.annot["bold"] = bool(self.bold_var.get())
+        self.annot["italic"] = bool(self.italic_var.get())
+        self.owner._on_annot_prop_changed()
+
+    def _apply_align(self):
+        if self.annot is None: return
+        label = self.align_var.get()
+        val = next((v for l, v in self.ALIGN_CHOICES if l == label), "left")
+        self.annot["align"] = val
+        self.owner._on_annot_prop_changed()
+
+    def _pick_color(self):
+        if self.annot is None: return
+        from tkinter import colorchooser
+        cur = self.annot.get("color", DEFAULT_ANNOT_COLOR)
+        _, hexcol = colorchooser.askcolor(color=cur, parent=self, title="텍스트 색상 선택")
+        if hexcol:
+            self.annot["color"] = hexcol
+            self.color_btn.config(bg=hexcol)
+            self.owner._on_annot_prop_changed()
+
+
+# ══════════════════════════════════════════════════════════
 #  미리보기 창  (크게보기 + 편집: 삭제·회전·텍스트)
 # ══════════════════════════════════════════════════════════
 class PreviewWin(tk.Toplevel):
@@ -335,14 +564,17 @@ class PreviewWin(tk.Toplevel):
         self._build()
         self.after(60, self._show)
 
-        self.bind("<Left>",       lambda e: self._go(-1))
-        self.bind("<Right>",      lambda e: self._go(1))
+        # 속성 패널의 입력창(Entry/Combobox)에 포커스가 있을 때는 아래
+        # 단축키들이 가로채면 안 된다 (예: X 좌표에 "-999" 를 입력하려는데
+        # "-" 가 축소 단축키로 먼저 소비되는 문제 방지).
+        self.bind("<Left>",       lambda e: None if self._focus_in_entry() else self._go(-1))
+        self.bind("<Right>",      lambda e: None if self._focus_in_entry() else self._go(1))
         self.bind("<Escape>",     lambda e: self.destroy())
-        self.bind("<plus>",       lambda e: self._zoom(1.25))
-        self.bind("<equal>",      lambda e: self._zoom(1.25))
-        self.bind("<minus>",      lambda e: self._zoom(1/1.25))
-        self.bind("<0>",          lambda e: self._zoom_reset())
-        self.bind("<Delete>",     self._delete_selected_annot)
+        self.bind("<plus>",       lambda e: None if self._focus_in_entry() else self._zoom(1.25))
+        self.bind("<equal>",      lambda e: None if self._focus_in_entry() else self._zoom(1.25))
+        self.bind("<minus>",      lambda e: None if self._focus_in_entry() else self._zoom(1/1.25))
+        self.bind("<0>",          lambda e: None if self._focus_in_entry() else self._zoom_reset())
+        self.bind("<Delete>",     lambda e: None if self._focus_in_entry() else self._delete_selected_annot())
 
     def _build(self):
         # ── 상단 타이틀 바 ───────────────────────────────
@@ -373,10 +605,15 @@ class PreviewWin(tk.Toplevel):
             b.pack(side="left", padx=(20 if key=="select" else 4, 4), pady=6)
             self.tool_btns[key] = b
 
-        # ── 이미지 캔버스 ─────────────────────────────────
-        cf = tk.Frame(self, bg=PREV_BG)
-        self.preview_cf = cf
-        cf.pack(fill="both", expand=True, padx=30, pady=12)
+        # ── 이미지 캔버스 + 우측 속성 패널 ──────────────────
+        mid = tk.Frame(self, bg=PREV_BG)
+        self.preview_cf = mid
+        mid.pack(fill="both", expand=True)
+        # 속성 패널은 텍스트를 선택했을 때만 pack() 되어 나타난다 (17번 요구사항)
+        self.prop_panel = TextPropPanel(mid, owner=self)
+
+        cf = tk.Frame(mid, bg=PREV_BG)
+        cf.pack(side="left", fill="both", expand=True, padx=30, pady=12)
         self.canvas = tk.Canvas(cf, bg=PREV_BG, bd=0, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>",      self._on_resize)
@@ -520,6 +757,7 @@ class PreviewWin(tk.Toplevel):
             self.pan_x = 0; self.pan_y = 0   # 페이지 바뀌면 위치 초기화
             self.selected_id = None
             self._move_state = None
+            self.prop_panel.pack_forget()
             self._show()
 
     def _zoom(self, factor):
@@ -608,6 +846,11 @@ class PreviewWin(tk.Toplevel):
                      fg="white" if active else "#c8a8ff")
         self.canvas.config(cursor="xterm" if key == "text" else "")
 
+    def _focus_in_entry(self):
+        """속성 패널의 입력창에 포커스가 있는지 확인 (단축키 충돌 방지용)."""
+        w = self.focus_get()
+        return isinstance(w, (tk.Entry, tk.Spinbox, tk.Text, ttk.Entry, ttk.Combobox))
+
     # ── annot(텍스트) 선택/생성/이동/삭제 ─────────────────────
     def _hit_test(self, ex, ey):
         """캔버스 좌표(ex,ey) 위에 있는 현재 페이지의 annot 을 찾는다."""
@@ -621,9 +864,30 @@ class PreviewWin(tk.Toplevel):
                         return annots[aid]
         return None
 
+    def _cur_page(self):
+        return self.pages[self.idx]
+
+    def _find_annot(self, aid):
+        for a in self._cur_page().get("annots", []):
+            if a["id"] == aid:
+                return a
+        return None
+
     def _select_annot(self, aid):
         self.selected_id = aid
+        annot = self._find_annot(aid) if aid is not None else None
+        if annot is None:
+            self.prop_panel.pack_forget()
+        else:
+            pg = self._cur_page()
+            self.prop_panel.show_annot(annot, pg.get("page_w_pt"), pg.get("page_h_pt"))
+            self.prop_panel.pack(side="right", fill="y")
         self._show()
+
+    def _on_annot_prop_changed(self):
+        """속성 패널에서 값이 바뀌었을 때 캔버스에 즉시 반영."""
+        self._show()
+        if self.on_change: self.on_change()
 
     def _ask_text(self):
         """텍스트 입력 대화상자. 테스트에서는 이 메서드를 mock 처리한다."""
@@ -637,23 +901,26 @@ class PreviewWin(tk.Toplevel):
         x_pt, y_pt = screen_to_pdf(ex, ey, self._cur_pw, self._cur_ph,
                                     self._cur_rot, self._sc, self._cx, self._cy)
         pg = self.pages[self.idx]
-        pg.setdefault("annots", []).append({
+        annot = {
             "id": next(_id_gen), "type": "text", "text": text,
             "x": x_pt, "y": y_pt,
-        })
-        self._show()
+            "font": DEFAULT_ANNOT_FONT, "font_size": DEFAULT_ANNOT_SIZE,
+            "color": DEFAULT_ANNOT_COLOR, "bold": False, "italic": False,
+            "align": "left", "rotation": 0.0,
+        }
+        pg.setdefault("annots", []).append(annot)
+        self._select_annot(annot["id"])
         if self.on_change: self.on_change()
 
     def _drag_annot(self, e):
         if self._sc is None or self._move_state is None: return
-        pg = self.pages[self.idx]
-        a = next((a for a in pg.get("annots", [])
-                  if a["id"] == self._move_state["annot_id"]), None)
+        a = self._find_annot(self._move_state["annot_id"])
         if a is None: return
         px_pdf, py_pdf = screen_to_pdf(e.x, e.y, self._cur_pw, self._cur_ph,
                                         self._cur_rot, self._sc, self._cx, self._cy)
         a["x"] = px_pdf + self._move_state["off_x"]
         a["y"] = py_pdf + self._move_state["off_y"]
+        self.prop_panel.refresh_xy_only()
         self._show()
 
     def _delete_selected_annot(self, e=None):
@@ -661,6 +928,7 @@ class PreviewWin(tk.Toplevel):
         pg = self.pages[self.idx]
         pg["annots"] = [a for a in pg.get("annots", []) if a["id"] != self.selected_id]
         self.selected_id = None
+        self.prop_panel.pack_forget()
         self._show()
         if self.on_change: self.on_change()
 
@@ -669,9 +937,26 @@ class PreviewWin(tk.Toplevel):
             if a.get("type") != "text": continue
             px, py = pdf_to_screen(a["x"], a["y"], self._cur_pw, self._cur_ph,
                                     self._cur_rot, self._sc, self._cx, self._cy)
-            item = self.canvas.create_text(px, py, text=a["text"], anchor="nw",
-                font=(FM, 13, "bold"), fill=ACCENT,
-                tags=(f"annot_{a['id']}", "annot"))
+            style_parts = []
+            if a.get("bold"):   style_parts.append("bold")
+            if a.get("italic"): style_parts.append("italic")
+            style = " ".join(style_parts) if style_parts else "normal"
+            size_pt = a.get("font_size", DEFAULT_ANNOT_SIZE)
+            size_px = max(1, int(round(size_pt * self._sc)))   # 음수=픽셀 크기(줌에 정확히 비례)
+            font_spec = (a.get("font", DEFAULT_ANNOT_FONT), -size_px, style)
+            # 텍스트 자체 회전(annot["rotation"])과 페이지 회전(pg["rot"])은
+            # 서로 별개의 값이며 섞이지 않는다. tk canvas 의 angle 은
+            # 반시계방향(+)이라, 이 프로그램의 페이지 회전 규약(시계방향 +)과
+            # 표시 방향을 통일하기 위해 부호를 반전해서 넘긴다.
+            angle = (-a.get("rotation", 0.0)) % 360
+            try:
+                item = self.canvas.create_text(
+                    px, py, text=a.get("text", ""), anchor="nw",
+                    font=font_spec, fill=a.get("color", DEFAULT_ANNOT_COLOR),
+                    justify=a.get("align", "left"), angle=angle,
+                    tags=(f"annot_{a['id']}", "annot"))
+            except Exception:
+                continue
             if self.edit_mode and a["id"] == self.selected_id:
                 bbox = self.canvas.bbox(item)
                 if bbox:
