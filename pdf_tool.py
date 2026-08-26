@@ -224,7 +224,76 @@ def rr(canvas, x1, y1, x2, y2, r=12, tags=(), **kw):
 
 
 # ══════════════════════════════════════════════════════════
-#  미리보기 창  (크게보기 + 편집: 삭제·회전)
+#  좌표 변환 (mm ↔ pt, 원본 페이지 pt ↔ 회전된 화면 픽셀)
+#
+#  현재 편집 좌표계는 PyMuPDF 렌더링/Canvas 와 쉽게 대응하기 위한
+#  좌상단 원점 + Y 아래 방향의 "편집 좌표계"이다 ("PDF pt" 라고 부르지만
+#  PDF 표준 좌표계와는 다르다는 점에 주의):
+#    - 회전을 적용하기 전(원본) 페이지 기준, 좌측 상단이 원점
+#    - X 는 오른쪽, Y 는 아래쪽으로 증가 (단위: pt, 1pt = 1/72 inch)
+#    - 텍스트/도형의 위치는 이 좌표계로 annots 에 저장한다 (줌/팬/회전과 무관)
+#
+#  최종 PDF에 실제로 내용을 굽는 단계(Phase 4 이후)에서는 PyMuPDF/PDF의
+#  실제 좌표계(좌하단 원점, Y 위쪽 증가)에 맞게 변환해야 한다:
+#  pdf_native_y = page_h_pt - our_y
+#  이 변환은 이번 Phase 에서는 구현하지 않는다.
+# ══════════════════════════════════════════════════════════
+MM_PER_INCH = 25.4
+PT_PER_INCH = 72.0
+
+def mm_to_pt(mm):
+    return mm * PT_PER_INCH / MM_PER_INCH
+
+def pt_to_mm(pt):
+    return pt * MM_PER_INCH / PT_PER_INCH
+
+
+def rotate_point_pt(x, y, w, h, rot):
+    """원본(회전 전) 페이지 pt 좌표 (x,y) 를, 폭 w·높이 h 인 페이지를
+    rot(0/90/180/270, 시계방향)만큼 회전했을 때의 pt 좌표로 변환한다."""
+    rot = rot % 360
+    if rot == 0:   return x, y
+    if rot == 90:  return h - y, x
+    if rot == 180: return w - x, h - y
+    if rot == 270: return y, w - x
+    raise ValueError(f"invalid rot {rot}")
+
+
+def unrotate_point_pt(x, y, w, h, rot):
+    """rotate_point_pt() 의 역변환. w,h 는 항상 원본(회전 전) 페이지 크기."""
+    rot = rot % 360
+    if rot == 0:   return x, y
+    if rot == 90:  return y, h - x
+    if rot == 180: return w - x, h - y
+    if rot == 270: return w - y, x
+    raise ValueError(f"invalid rot {rot}")
+
+
+def rotated_size_pt(w, h, rot):
+    """rot 만큼 회전했을 때의 (폭, 높이). 90/270 이면 폭·높이가 뒤바뀐다."""
+    return (w, h) if rot % 180 == 0 else (h, w)
+
+
+def pdf_to_screen(x, y, page_w_pt, page_h_pt, rot, scale, cx, cy):
+    """원본 페이지 pt 좌표 → 캔버스 픽셀 좌표.
+    scale: pt→px 배율, (cx,cy): 회전+확대된 페이지 이미지의 캔버스 중심 좌표."""
+    rx, ry = rotate_point_pt(x, y, page_w_pt, page_h_pt, rot)
+    rw, rh = rotated_size_pt(page_w_pt, page_h_pt, rot)
+    px = cx - (rw*scale)/2 + rx*scale
+    py = cy - (rh*scale)/2 + ry*scale
+    return px, py
+
+
+def screen_to_pdf(px, py, page_w_pt, page_h_pt, rot, scale, cx, cy):
+    """pdf_to_screen() 의 역변환."""
+    rw, rh = rotated_size_pt(page_w_pt, page_h_pt, rot)
+    rx = (px - cx + (rw*scale)/2) / scale
+    ry = (py - cy + (rh*scale)/2) / scale
+    return unrotate_point_pt(rx, ry, page_w_pt, page_h_pt, rot)
+
+
+# ══════════════════════════════════════════════════════════
+#  미리보기 창  (크게보기 + 편집: 삭제·회전·텍스트)
 # ══════════════════════════════════════════════════════════
 class PreviewWin(tk.Toplevel):
     def __init__(self, parent, pages, start, on_change=None):
@@ -239,6 +308,19 @@ class PreviewWin(tk.Toplevel):
         self.pan_y     = 0           # 이동 오프셋 Y
         self._drag_sx  = None        # 드래그 시작점
         self._drag_sy  = None
+
+        # ── 편집 모드 (텍스트 객체) ──────────────────────────
+        self.edit_mode   = False     # 보기 모드(기본) / 편집 모드
+        self.tool        = "select"  # "select" | "text"
+        self.selected_id = None      # 선택된 annot id
+        self._move_state = None      # 드래그로 이동 중인 annot 정보
+        # 마지막 _show() 렌더링 기준 좌표 변환 파라미터 (screen<->pdf 변환용)
+        self._sc      = None
+        self._cx       = None
+        self._cy       = None
+        self._cur_pw   = None
+        self._cur_ph   = None
+        self._cur_rot  = 0
 
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         w, h   = min(940, sw-60), min(820, sh-60)
@@ -260,6 +342,7 @@ class PreviewWin(tk.Toplevel):
         self.bind("<equal>",      lambda e: self._zoom(1.25))
         self.bind("<minus>",      lambda e: self._zoom(1/1.25))
         self.bind("<0>",          lambda e: self._zoom_reset())
+        self.bind("<Delete>",     self._delete_selected_annot)
 
     def _build(self):
         # ── 상단 타이틀 바 ───────────────────────────────
@@ -272,18 +355,36 @@ class PreviewWin(tk.Toplevel):
                   bg=PREV_BG, fg="#665588", font=(FM, 14),
                   relief="flat", bd=0, cursor="hand2",
                   activebackground=PREV_BG).pack(side="right")
+        self.edit_btn = tk.Button(top, text="✎ 편집 모드", command=self._toggle_edit,
+                  bg="#2e1a55", fg="#c8a8ff", font=FONT_B,
+                  relief="flat", padx=12, pady=5, cursor="hand2",
+                  bd=0, activebackground="#3e2a70")
+        self.edit_btn.pack(side="right", padx=(0,10))
+
+        # ── 편집 툴바 (편집 모드일 때만 표시) ────────────
+        self.edit_toolbar = tk.Frame(self, bg="#1e0c44")
+        self.tool_btns = {}
+        for key, label in [("select","🖱 선택"), ("text","T 텍스트")]:
+            b = tk.Button(self.edit_toolbar, text=label,
+                          command=lambda k=key: self._set_tool(k),
+                          bg="#2e1a55", fg="#c8a8ff", font=FONT_B,
+                          relief="flat", padx=14, pady=6, cursor="hand2",
+                          bd=0, activebackground="#3e2a70")
+            b.pack(side="left", padx=(20 if key=="select" else 4, 4), pady=6)
+            self.tool_btns[key] = b
 
         # ── 이미지 캔버스 ─────────────────────────────────
         cf = tk.Frame(self, bg=PREV_BG)
+        self.preview_cf = cf
         cf.pack(fill="both", expand=True, padx=30, pady=12)
         self.canvas = tk.Canvas(cf, bg=PREV_BG, bd=0, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>",      self._on_resize)
         self.canvas.bind("<MouseWheel>",
                          lambda e: self._zoom(1.15 if e.delta > 0 else 1/1.15))
-        self.canvas.bind("<ButtonPress-1>",  self._drag_start)
-        self.canvas.bind("<B1-Motion>",      self._drag_move)
-        self.canvas.bind("<ButtonRelease-1>",self._drag_end)
+        self.canvas.bind("<ButtonPress-1>",  self._on_canvas_press)
+        self.canvas.bind("<B1-Motion>",      self._on_canvas_motion)
+        self.canvas.bind("<ButtonRelease-1>",self._on_canvas_release)
 
         # ── 하단 컨트롤 바 (네비 + 편집) ────────────────
         nav = tk.Frame(self, bg="#1e0c44", pady=10)
@@ -349,6 +450,7 @@ class PreviewWin(tk.Toplevel):
         self._rid = self.after(80, self._show)
 
     def _show(self):
+        self._sc = None   # 렌더링 실패 시 좌표 변환/클릭 처리가 동작하지 않도록 초기화
         n = len(self.pages)
         if n == 0:
             self.destroy(); return
@@ -375,7 +477,8 @@ class PreviewWin(tk.Toplevel):
         try:
             doc  = fitz.open(pg["src"])
             page = doc[pg["pidx"]]
-            base_sc = min(cw*0.86/page.rect.width, ch*0.90/page.rect.height)
+            pw_pt, ph_pt = page.rect.width, page.rect.height
+            base_sc = min(cw*0.86/pw_pt, ch*0.90/ph_pt)
             base_sc = max(base_sc, 0.4)
             sc   = base_sc * self.zoom
             pix  = page.get_pixmap(matrix=fitz.Matrix(sc, sc), alpha=False)
@@ -398,6 +501,15 @@ class PreviewWin(tk.Toplevel):
                 ix-iw//2-3, iy-ih//2-3, ix+iw//2+3, iy+ih//2+3,
                 fill="white", outline="#443366", width=1)
             self.canvas.create_image(ix, iy, image=self.photo)
+
+            # 좌표 변환 상태 저장 (클릭/드래그에서 screen_to_pdf 에 사용)
+            self._sc      = sc
+            self._cx      = ix
+            self._cy      = iy
+            self._cur_pw  = pw_pt
+            self._cur_ph  = ph_pt
+            self._cur_rot = rot
+            self._draw_annots(pg)
         except Exception as e:
             self.canvas.create_text(cw//2, ch//2, text=f"오류:\n{e}",
                                     fill="#a88", font=FONT, justify="center")
@@ -406,6 +518,8 @@ class PreviewWin(tk.Toplevel):
         if 0 <= self.idx+d < len(self.pages):
             self.idx += d
             self.pan_x = 0; self.pan_y = 0   # 페이지 바뀌면 위치 초기화
+            self.selected_id = None
+            self._move_state = None
             self._show()
 
     def _zoom(self, factor):
@@ -419,13 +533,48 @@ class PreviewWin(tk.Toplevel):
         self.zoom_lbl.config(text="100%")
         self._show()
 
-    # ── 드래그 이동 ──────────────────────────────────────────
-    def _drag_start(self, e):
+    # ── 캔버스 드래그 — 편집 모드/도구에 따라 분기 ────────────
+    def _on_canvas_press(self, e):
+        if self.edit_mode and self.tool == "text":
+            self._create_text_at(e.x, e.y)
+            return
+        if self.edit_mode and self.tool == "select":
+            hit = self._hit_test(e.x, e.y)
+            if hit is not None:
+                self._select_annot(hit["id"])
+                if self._sc is not None:
+                    px_pdf, py_pdf = screen_to_pdf(
+                        e.x, e.y, self._cur_pw, self._cur_ph,
+                        self._cur_rot, self._sc, self._cx, self._cy)
+                    self._move_state = {
+                        "annot_id": hit["id"],
+                        "off_x": hit["x"] - px_pdf,
+                        "off_y": hit["y"] - py_pdf,
+                    }
+                return
+            else:
+                self._select_annot(None)
+        self._pan_start(e)
+
+    def _on_canvas_motion(self, e):
+        if self._move_state is not None:
+            self._drag_annot(e)
+            return
+        self._pan_move(e)
+
+    def _on_canvas_release(self, e):
+        if self._move_state is not None:
+            self._move_state = None
+            return
+        self._pan_end(e)
+
+    # ── 팬(이동) ─────────────────────────────────────────────
+    def _pan_start(self, e):
         self._drag_sx = e.x
         self._drag_sy = e.y
         self.canvas.config(cursor="fleur")   # 십자 이동 커서
 
-    def _drag_move(self, e):
+    def _pan_move(self, e):
         if self._drag_sx is None: return
         self.pan_x += e.x - self._drag_sx
         self.pan_y += e.y - self._drag_sy
@@ -433,10 +582,104 @@ class PreviewWin(tk.Toplevel):
         self._drag_sy = e.y
         self._show()
 
-    def _drag_end(self, e):
+    def _pan_end(self, e):
         self._drag_sx = None
         self._drag_sy = None
         self.canvas.config(cursor="")
+
+    # ── 편집 모드 / 도구 선택 ─────────────────────────────────
+    def _toggle_edit(self):
+        self.edit_mode = not self.edit_mode
+        self.edit_btn.config(bg=ACCENT if self.edit_mode else "#2e1a55",
+                              fg="white" if self.edit_mode else "#c8a8ff")
+        if self.edit_mode:
+            self.edit_toolbar.pack(fill="x", before=self.preview_cf)
+            self._set_tool(self.tool)
+        else:
+            self.edit_toolbar.pack_forget()
+            self._select_annot(None)
+        self._show()
+
+    def _set_tool(self, key):
+        self.tool = key
+        for k, b in self.tool_btns.items():
+            active = (k == key)
+            b.config(bg=ACCENT if active else "#2e1a55",
+                     fg="white" if active else "#c8a8ff")
+        self.canvas.config(cursor="xterm" if key == "text" else "")
+
+    # ── annot(텍스트) 선택/생성/이동/삭제 ─────────────────────
+    def _hit_test(self, ex, ey):
+        """캔버스 좌표(ex,ey) 위에 있는 현재 페이지의 annot 을 찾는다."""
+        pg = self.pages[self.idx]
+        annots = {a["id"]: a for a in pg.get("annots", [])}
+        for item in reversed(self.canvas.find_overlapping(ex-2, ey-2, ex+2, ey+2)):
+            for t in self.canvas.gettags(item):
+                if t.startswith("annot_"):
+                    aid = int(t.split("_")[1])
+                    if aid in annots:
+                        return annots[aid]
+        return None
+
+    def _select_annot(self, aid):
+        self.selected_id = aid
+        self._show()
+
+    def _ask_text(self):
+        """텍스트 입력 대화상자. 테스트에서는 이 메서드를 mock 처리한다."""
+        from tkinter import simpledialog
+        return simpledialog.askstring("텍스트 입력", "내용을 입력하세요:", parent=self)
+
+    def _create_text_at(self, ex, ey):
+        if self._sc is None: return
+        text = self._ask_text()
+        if not text: return
+        x_pt, y_pt = screen_to_pdf(ex, ey, self._cur_pw, self._cur_ph,
+                                    self._cur_rot, self._sc, self._cx, self._cy)
+        pg = self.pages[self.idx]
+        pg.setdefault("annots", []).append({
+            "id": next(_id_gen), "type": "text", "text": text,
+            "x": x_pt, "y": y_pt,
+        })
+        self._show()
+        if self.on_change: self.on_change()
+
+    def _drag_annot(self, e):
+        if self._sc is None or self._move_state is None: return
+        pg = self.pages[self.idx]
+        a = next((a for a in pg.get("annots", [])
+                  if a["id"] == self._move_state["annot_id"]), None)
+        if a is None: return
+        px_pdf, py_pdf = screen_to_pdf(e.x, e.y, self._cur_pw, self._cur_ph,
+                                        self._cur_rot, self._sc, self._cx, self._cy)
+        a["x"] = px_pdf + self._move_state["off_x"]
+        a["y"] = py_pdf + self._move_state["off_y"]
+        self._show()
+
+    def _delete_selected_annot(self, e=None):
+        if self.selected_id is None: return
+        pg = self.pages[self.idx]
+        pg["annots"] = [a for a in pg.get("annots", []) if a["id"] != self.selected_id]
+        self.selected_id = None
+        self._show()
+        if self.on_change: self.on_change()
+
+    def _draw_annots(self, pg):
+        for a in pg.get("annots", []):
+            if a.get("type") != "text": continue
+            px, py = pdf_to_screen(a["x"], a["y"], self._cur_pw, self._cur_ph,
+                                    self._cur_rot, self._sc, self._cx, self._cy)
+            item = self.canvas.create_text(px, py, text=a["text"], anchor="nw",
+                font=(FM, 13, "bold"), fill=ACCENT,
+                tags=(f"annot_{a['id']}", "annot"))
+            if self.edit_mode and a["id"] == self.selected_id:
+                bbox = self.canvas.bbox(item)
+                if bbox:
+                    pad = 4
+                    self.canvas.create_rectangle(
+                        bbox[0]-pad, bbox[1]-pad, bbox[2]+pad, bbox[3]+pad,
+                        outline=ACCENT, width=2, dash=(4,2),
+                        tags=("annot", "annotsel"))
 
     # ── 편집 ────────────────────────────────────────────────
     def _rotate(self, deg):
@@ -901,6 +1144,10 @@ class OrganizeTab(tk.Frame):
             self._render()
         elif key == "dup":
             pg = dict(self.pages[idx]); pg["id"] = next(_id_gen)
+            # annots 는 리스트(가변 객체)이므로 얕은 복사(dict())만 하면
+            # 원본과 복제본이 같은 리스트를 공유하게 된다 — 반드시 새 리스트로
+            # 깊은 복사해서 이후 편집이 서로 독립적이도록 한다.
+            pg["annots"] = [dict(a) for a in pg.get("annots", [])]
             self.pages.insert(idx+1, pg); self._render()
         elif key == "delete":
             self.pages.pop(idx)
@@ -939,10 +1186,23 @@ class OrganizeTab(tk.Frame):
         for path in paths:
             try:
                 r = PdfReader(path)
+                # 페이지 pt 크기는 회전 편집(rot)과 무관한 "원본" 크기여야
+                # 하므로, 미리보기 렌더링과 동일한 출처(fitz page.rect)에서
+                # 가져와 일관성을 유지한다.
+                fdoc = fitz.open(path) if PREVIEW_OK else None
                 for pidx in range(len(r.pages)):
                     pil = make_thumb(path, pidx, self.TW0, self.TH0)
+                    if fdoc is not None:
+                        frect = fdoc[pidx].rect
+                        pw_pt, ph_pt = frect.width, frect.height
+                    else:
+                        mb = r.pages[pidx].mediabox
+                        pw_pt, ph_pt = float(mb.width), float(mb.height)
                     self.pages.append({"id":next(_id_gen),"src":path,
-                                       "pidx":pidx,"pil":pil,"rot":0})
+                                       "pidx":pidx,"pil":pil,"rot":0,
+                                       "page_w_pt":pw_pt,"page_h_pt":ph_pt,
+                                       "annots":[]})
+                if fdoc is not None: fdoc.close()
             except Exception as e:
                 messagebox.showerror("오류",f"{os.path.basename(path)}\n{e}")
         self._render()
