@@ -361,6 +361,9 @@ class TestPreviewWinText(unittest.TestCase):
         pw._go(1)
         self.assertEqual(pw.idx, 1)
         self.assertIsNone(pw.selected_id)
+        # 텍스트 하나를 만들고 나면 반복 생성을 막기 위해 선택 도구로 자동
+        # 전환되므로, 다른 페이지에 두 번째 텍스트를 만들려면 다시 선택해야 함.
+        pw._set_tool("text")
         pw._on_canvas_press(FakeEvent(x=200, y=200))
         self.assertEqual(len(pages[0]["annots"]), 1)
         self.assertEqual(len(pages[1]["annots"]), 1)
@@ -1222,11 +1225,13 @@ class TestUsabilityImprovements(unittest.TestCase):
         pages = self._make_pages()
         pw, annot = self._open_preview_with_text(pages)
         self.assertTrue(pw.is_fullscreen, "미리보기는 기본으로 전체화면 시작해야 함")
-        self.assertEqual(pw.fullscreen_btn.cget("text"), "⛶ 창모드")
+        self.assertEqual(pw.fullscreen_btn.cget("text"), "□")
+        self.assertEqual(pw.fullscreen_btn.cget("fg"), pt.ACCENT)
 
         pw._toggle_fullscreen()
         self.assertFalse(pw.is_fullscreen)
-        self.assertEqual(pw.fullscreen_btn.cget("text"), "⛶ 전체화면")
+        self.assertEqual(pw.fullscreen_btn.cget("text"), "□")
+        self.assertEqual(pw.fullscreen_btn.cget("fg"), pt.TEXT_DIM)
         try:
             self.assertFalse(bool(pw.attributes("-fullscreen")))
         except pt.tk.TclError:
@@ -1234,7 +1239,37 @@ class TestUsabilityImprovements(unittest.TestCase):
 
         pw._toggle_fullscreen()
         self.assertTrue(pw.is_fullscreen)
-        self.assertEqual(pw.fullscreen_btn.cget("text"), "⛶ 창모드")
+        self.assertEqual(pw.fullscreen_btn.cget("fg"), pt.ACCENT)
+
+    # ── 텍스트 생성 후 자동으로 선택 도구로 전환 (반복 생성 방지) ─────
+    def test_creating_text_auto_switches_tool_to_select(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        self.assertEqual(pw.tool, "select")
+        self.assertEqual(pw.tool_btns["select"].cget("bg"), pt.ACCENT)
+        self.assertEqual(pw.tool_btns["text"].cget("bg"), pt.TOOLBAR)
+
+        # 도구가 자동으로 바뀌었으므로, 다른 빈 곳을 클릭해도 새 텍스트가 생기면 안 됨
+        pw._on_canvas_press(FakeEvent(x=600, y=600))
+        self.assertEqual(len(pages[0]["annots"]), 1)
+
+    # ── 캔버스 클릭 시 속성패널 입력창에서 포커스를 되찾아 Delete 등
+    #     단축키가 항상 캔버스 기준으로 동작하게 함 ─────────────────
+    def test_selecting_annot_on_canvas_reclaims_keyboard_focus_from_entry(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        with patch.object(pw.canvas, "focus_set") as mock_focus_set:
+            pw._on_canvas_press(FakeEvent(x=300, y=300))
+        mock_focus_set.assert_called()
+
+    # ── 속성 패널의 삭제 버튼 ─────────────────────────────────
+    def test_delete_button_in_property_panel_removes_selected_text(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        self.assertEqual(len(pages[0]["annots"]), 1)
+        pw.prop_panel._delete_annot()
+        self.assertEqual(pages[0]["annots"], [])
+        self.assertIsNone(pw.selected_id)
 
     @staticmethod
     def _find_entry_for_var_local(panel, var):

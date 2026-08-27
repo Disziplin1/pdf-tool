@@ -416,6 +416,17 @@ class TextPropPanel(tk.Frame):
         e_rot.bind("<Return>", lambda e: self._apply_rotation())
         e_rot.bind("<FocusOut>", lambda e: self._apply_rotation())
 
+        # ── 삭제 ──────────────────────────────────────────
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=14, pady=(4,10))
+        tk.Button(self, text="🗑 이 텍스트 삭제", command=self._delete_annot,
+                  bg=DANGER, fg="white", font=FONT, relief="flat",
+                  padx=12, pady=7, cursor="hand2", bd=0,
+                  activebackground=_shade(DANGER, 0.9)).pack(fill="x", padx=14, pady=(0,14))
+
+    def _delete_annot(self):
+        if self.annot is None: return
+        self.owner._delete_selected_annot()
+
     def _font_list(self):
         try:
             from tkinter import font as tkfont
@@ -631,11 +642,13 @@ class PreviewWin(tk.Toplevel):
                   bg=BG, fg=TEXT_DIM, font=(FM, 14),
                   relief="flat", bd=0, cursor="hand2",
                   activebackground=BG).pack(side="right")
-        self.fullscreen_btn = tk.Button(top, text="⛶ 창모드", command=self._toggle_fullscreen,
-                  bg=TOOLBAR, fg=TEXT_DIM, font=FONT_B,
-                  relief="flat", padx=12, pady=5, cursor="hand2",
-                  bd=0, activebackground=_shade(TOOLBAR, 0.92))
-        self.fullscreen_btn.pack(side="right", padx=(0,10))
+        # 네이티브 창 컨트롤(최대화/복원 버튼)처럼 아이콘만 있는 작은 버튼으로,
+        # ✕ 버튼 바로 옆에 배치한다. 시작이 전체화면이므로 강조색으로 표시.
+        self.fullscreen_btn = tk.Button(top, text="□", command=self._toggle_fullscreen,
+                  bg=BG, fg=ACCENT, font=(FM, 13),
+                  relief="flat", bd=0, cursor="hand2",
+                  activebackground=BG)
+        self.fullscreen_btn.pack(side="right", padx=(0,6))
         self.edit_btn = tk.Button(top, text="✎ 편집 모드", command=self._toggle_edit,
                   bg=TOOLBAR, fg=TEXT_DIM, font=FONT_B,
                   relief="flat", padx=12, pady=5, cursor="hand2",
@@ -827,6 +840,10 @@ class PreviewWin(tk.Toplevel):
             self._create_text_at(e.x, e.y)
             return
         if self.edit_mode and self.tool == "select":
+            # 속성 패널의 입력창에 포커스가 남아있으면 Delete 등 단축키가
+            # 캔버스가 아니라 그 입력창으로 먼저 소비돼버린다. 캔버스를
+            # 클릭하는 순간 포커스를 캔버스로 되돌려 단축키가 항상 먹게 한다.
+            self.canvas.focus_set()
             hit = self._hit_test(e.x, e.y)
             if hit is not None:
                 self._select_annot(hit["id"])
@@ -884,7 +901,9 @@ class PreviewWin(tk.Toplevel):
             self.is_fullscreen = False
         if not self.is_fullscreen:
             self.geometry(self._windowed_geometry)
-        self.fullscreen_btn.config(text="⛶ 창모드" if self.is_fullscreen else "⛶ 전체화면")
+        # 아이콘 자체는 항상 같은 사각형(□)이고, 폰트별 복원 아이콘 글리프
+        # 지원 여부에 기대지 않기 위해 현재 전체화면 상태만 강조 색으로 표시한다.
+        self.fullscreen_btn.config(fg=ACCENT if self.is_fullscreen else TEXT_DIM)
 
     # ── 편집 모드 / 도구 선택 ─────────────────────────────────
     def _toggle_edit(self):
@@ -979,6 +998,10 @@ class PreviewWin(tk.Toplevel):
         self._select_annot(annot["id"])
         self.prop_panel.focus_content_for_edit()
         if self.on_change: self.on_change()
+        # 텍스트 도구를 계속 켜둔 채로 두면 화면을 클릭할 때마다 새 텍스트가
+        # 계속 생겨버린다. 하나 만들고 나면 선택 도구로 자동 전환해서,
+        # 이어지는 클릭은 (재)선택/이동/빈 곳 클릭으로 동작하게 한다.
+        self._set_tool("select")
 
     def _drag_annot(self, e):
         if self._sc is None or self._move_state is None: return
