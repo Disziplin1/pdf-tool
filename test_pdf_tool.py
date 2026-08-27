@@ -1523,5 +1523,306 @@ class TestExportBakesTextAnnots(unittest.TestCase):
         self.assertEqual(rotation, 90)
 
 
+# ══════════════════════════════════════════════════════════
+#  7. 도형(사각형/화살표/강조) — 생성/선택/이동/삭제/렌더/내보내기
+# ══════════════════════════════════════════════════════════
+class TestShapeAnnots(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pt.TkinterDnD.Tk() if pt.DND_OK else pt.tk.Tk()
+        cls.root.withdraw()
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_shape_test_")
+        cls.pdf_path = os.path.join(cls.tmpdir, "sample.pdf")
+        make_pdf(cls.pdf_path, sizes=((595.28, 841.89),))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _make_pages(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        return ot.pages
+
+    def _open_preview(self, pages):
+        pw = pt.PreviewWin(self.root, pages, 0)
+        pw.update_idletasks(); pw.geometry("1150x820+0+0"); pw.update(); pw._show()
+        self.addCleanup(pw.destroy)
+        pw._toggle_edit()
+        return pw
+
+    def _drag_create(self, pw, tool, p0, p1):
+        pw._set_tool(tool)
+        pw._on_canvas_press(FakeEvent(x=p0[0], y=p0[1]))
+        pw._on_canvas_motion(FakeEvent(x=p1[0], y=p1[1]))
+        pw._on_canvas_release(FakeEvent(x=p1[0], y=p1[1]))
+
+    # ── 생성 ────────────────────────────────────────────────
+    def test_drag_creates_rect_with_normalized_corners(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (400, 400), (300, 300))  # 왼쪽 위로 드래그
+        self.assertEqual(len(pages[0]["annots"]), 1)
+        a = pages[0]["annots"][0]
+        self.assertEqual(a["type"], "rect")
+        self.assertLess(a["x0"], a["x1"])
+        self.assertLess(a["y0"], a["y1"])
+        self.assertEqual(pw.selected_id, a["id"])
+
+    def test_drag_creates_arrow_preserving_direction(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "arrow", (300, 300), (400, 250))
+        a = pages[0]["annots"][0]
+        self.assertEqual(a["type"], "arrow")
+        # 화살표는 방향이 의미 있으므로 시작/끝을 정규화하면 안 됨
+        expect_start = pt.screen_to_pdf(300, 300, pw._cur_pw, pw._cur_ph, pw._cur_rot,
+                                         pw._sc, pw._cx, pw._cy)
+        self.assertAlmostEqual(a["x0"], expect_start[0], places=4)
+        self.assertAlmostEqual(a["y0"], expect_start[1], places=4)
+
+    def test_drag_creates_highlight(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "highlight", (300, 300), (450, 330))
+        a = pages[0]["annots"][0]
+        self.assertEqual(a["type"], "highlight")
+        self.assertEqual(a.get("fill_color"), pt.DEFAULT_HIGHLIGHT_COLOR)
+
+    def test_tiny_drag_does_not_create_shape(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (301, 301))
+        self.assertEqual(len(pages[0]["annots"]), 0)
+
+    def test_creating_shape_auto_switches_tool_to_select(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (400, 380))
+        self.assertEqual(pw.tool, "select")
+
+    # ── 선택 시 도형 속성 패널 표시 ──────────────────────────
+    def test_selecting_shape_shows_shape_panel_not_text_panel(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (400, 380))
+        self.assertIn(pw.shape_panel, pw.shape_panel.master.pack_slaves())
+        self.assertNotIn(pw.prop_panel, pw.prop_panel.master.pack_slaves())
+        self.assertIs(pw.shape_panel.annot, pages[0]["annots"][0])
+
+    def test_deselecting_hides_shape_panel(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (400, 380))
+        pw._select_annot(None)
+        self.assertNotIn(pw.shape_panel, pw.shape_panel.master.pack_slaves())
+
+    # ── 이동 ────────────────────────────────────────────────
+    def test_dragging_selected_rect_moves_both_corners_together(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (400, 380))
+        a = pages[0]["annots"][0]
+        w0, h0 = a["x1"] - a["x0"], a["y1"] - a["y0"]
+
+        pw._set_tool("select")
+        pw._on_canvas_press(FakeEvent(x=350, y=340))   # 사각형 내부 클릭
+        self.assertIsNotNone(pw._move_state)
+        pw._on_canvas_motion(FakeEvent(x=390, y=380))
+        pw._on_canvas_release(FakeEvent(x=390, y=380))
+
+        w1, h1 = a["x1"] - a["x0"], a["y1"] - a["y0"]
+        self.assertAlmostEqual(w0, w1, places=4)
+        self.assertAlmostEqual(h0, h1, places=4)
+
+    # ── 삭제 ────────────────────────────────────────────────
+    def test_delete_selected_shape_via_panel_button(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (400, 380))
+        pw.shape_panel._delete_shape()
+        self.assertEqual(pages[0]["annots"], [])
+        self.assertIsNone(pw.selected_id)
+
+    def test_delete_key_removes_selected_shape(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "arrow", (300, 300), (400, 380))
+        pw._delete_selected_annot()
+        self.assertEqual(pages[0]["annots"], [])
+
+    # ── 속성 패널 편집 ──────────────────────────────────────
+    def test_shape_panel_geom_edit_moves_shape(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (400, 380))
+        panel = pw.shape_panel
+        page_h_mm = pt.pt_to_mm(panel.page_h_pt)
+        panel.x0_var.set("20.00"); panel.x1_var.set("60.00")
+        panel.y0_var.set("30.00"); panel.y1_var.set("50.00")
+        panel._apply_geom()
+        a = pages[0]["annots"][0]
+        self.assertAlmostEqual(pt.pt_to_mm(a["x0"]), 20.00, places=4)
+        self.assertAlmostEqual(pt.pt_to_mm(a["x1"]), 60.00, places=4)
+        # Y 는 좌하단 원점 기준 표시이므로 내부 저장은 페이지 높이 기준 반전값
+        self.assertAlmostEqual(page_h_mm - pt.pt_to_mm(a["y0"]), 30.00, places=4)
+        self.assertAlmostEqual(page_h_mm - pt.pt_to_mm(a["y1"]), 50.00, places=4)
+
+    def test_shape_panel_line_width_and_color_apply(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (400, 380))
+        panel = pw.shape_panel
+        panel.line_width_var.set("5.0")
+        panel._apply_line_width()
+        a = pages[0]["annots"][0]
+        self.assertEqual(a["line_width"], 5.0)
+
+        panel.annot["line_color"] = "#00FF00"  # 색상선택 다이얼로그 없이 직접 확인
+        self.assertEqual(a["line_color"], "#00FF00")
+
+    def test_shape_panel_fill_toggle_applies(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (400, 380))
+        panel = pw.shape_panel
+        self.assertFalse(pages[0]["annots"][0].get("fill_enabled"))
+        panel.fill_enabled_var.set(True)
+        panel._apply_fill_enabled()
+        self.assertTrue(pages[0]["annots"][0]["fill_enabled"])
+
+    def test_arrow_panel_hides_fill_section(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "arrow", (300, 300), (400, 380))
+        panel = pw.shape_panel
+        self.assertNotIn(panel.fill_frame, panel.pack_slaves())
+        self.assertIn(panel.line_frame, panel.pack_slaves())
+
+    def test_highlight_panel_shows_only_highlight_color(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "highlight", (300, 300), (400, 380))
+        panel = pw.shape_panel
+        self.assertNotIn(panel.line_frame, panel.pack_slaves())
+        self.assertNotIn(panel.fill_frame, panel.pack_slaves())
+        self.assertIn(panel.highlight_frame, panel.pack_slaves())
+
+    # ── 렌더링이 예외 없이 동작하는지 (회귀 방지) ──────────────
+    def test_all_shape_types_render_without_crash(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (250, 250), (350, 320))
+        pw._set_tool("rect")
+        self._drag_create(pw, "arrow", (250, 400), (400, 450))
+        self._drag_create(pw, "highlight", (250, 500), (400, 530))
+        self.assertEqual(len(pages[0]["annots"]), 3)
+        pw._redraw_annots()   # 예외 없이 완료되면 성공
+
+    # ── PDF 내보내기 ────────────────────────────────────────
+    def _export(self, ot, out_path):
+        with patch.object(pt.filedialog, "asksaveasfilename", return_value=out_path), \
+             patch.object(pt.messagebox, "showinfo"), \
+             patch.object(pt.messagebox, "showwarning"), \
+             patch.object(pt.messagebox, "showerror") as mock_err:
+            ot._export()
+        self.assertFalse(mock_err.called, f"내보내기 중 오류: {mock_err.call_args}")
+
+    def test_export_bakes_rect_with_border_and_optional_fill(self):
+        ot, pages = pt.OrganizeTab(self.root), None
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        pages = ot.pages
+        pages[0]["annots"].append({
+            "id": 501, "type": "rect",
+            "x0": pt.mm_to_pt(20), "y0": pt.mm_to_pt(20),
+            "x1": pt.mm_to_pt(60), "y1": pt.mm_to_pt(50),
+            "line_color": "#FF0000", "line_width": 3.0,
+            "fill_color": "#00FF00", "fill_enabled": True,
+        })
+        out = os.path.join(self.tmpdir, "out_rect.pdf")
+        self._export(ot, out)
+
+        doc = fitz.open(out)
+        drawings = doc[0].get_drawings()
+        doc.close()
+        self.assertTrue(drawings, "사각형이 결과 PDF 에 그려진 벡터 도형으로 존재해야 함")
+
+    def test_export_bakes_arrow_as_line_drawing(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        pages = ot.pages
+        pages[0]["annots"].append({
+            "id": 502, "type": "arrow",
+            "x0": pt.mm_to_pt(20), "y0": pt.mm_to_pt(20),
+            "x1": pt.mm_to_pt(80), "y1": pt.mm_to_pt(60),
+            "line_color": "#000000", "line_width": 2.0,
+        })
+        out = os.path.join(self.tmpdir, "out_arrow.pdf")
+        self._export(ot, out)
+
+        doc = fitz.open(out)
+        drawings = doc[0].get_drawings()
+        doc.close()
+        self.assertGreaterEqual(len(drawings), 2, "화살표 선 + 화살촉이 그려져야 함")
+
+    def test_export_bakes_highlight_as_native_highlight_annot(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        pages = ot.pages
+        pages[0]["annots"].append({
+            "id": 503, "type": "highlight",
+            "x0": pt.mm_to_pt(20), "y0": pt.mm_to_pt(20),
+            "x1": pt.mm_to_pt(80), "y1": pt.mm_to_pt(30),
+            "fill_color": "#FFFF00",
+        })
+        out = os.path.join(self.tmpdir, "out_highlight.pdf")
+        self._export(ot, out)
+
+        doc = fitz.open(out)
+        page = doc[0]
+        annots = list(page.annots())
+        self.assertEqual(len(annots), 1)
+        self.assertEqual(annots[0].type[1], "Highlight")
+        doc.close()
+
+    def test_export_shape_position_respects_native_source_rotation(self):
+        """소스 PDF 자체가 이미 회전(native rotation)되어 있는 경우에도
+        사각형이 화면에서 보던 자리 그대로 나와야 한다."""
+        rotated_pdf = os.path.join(self.tmpdir, "rotated_native.pdf")
+        doc = fitz.open()
+        page = doc.new_page(width=595.28, height=841.89)
+        page.set_rotation(90)
+        doc.save(rotated_pdf)
+        doc.close()
+
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([rotated_pdf])
+        pages = ot.pages
+        # page_w_pt/page_h_pt 는 이미 회전 반영된(swap 된) 값이어야 함
+        self.assertAlmostEqual(pages[0]["page_w_pt"], 841.89, places=1)
+        self.assertAlmostEqual(pages[0]["page_h_pt"], 595.28, places=1)
+
+        pages[0]["annots"].append({
+            "id": 504, "type": "rect",
+            "x0": pt.mm_to_pt(10), "y0": pt.mm_to_pt(10),
+            "x1": pt.mm_to_pt(30), "y1": pt.mm_to_pt(25),
+            "line_color": "#000000", "line_width": 2.0,
+            "fill_color": "#FFFFFF", "fill_enabled": False,
+        })
+        out = os.path.join(self.tmpdir, "out_native_rot.pdf")
+        self._export(ot, out)
+
+        doc = fitz.open(out)
+        drawings = doc[0].get_drawings()
+        self.assertTrue(drawings)
+        doc.close()
+
+
 if __name__ == "__main__":
     unittest.main()

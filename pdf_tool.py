@@ -3,7 +3,7 @@ PDF 도구  ·  무료 · 오프라인 · 완전 로컬
   ▸ 정리 탭  : 드래그 정렬 · 체크박스 · 호버 툴바 · 미리보기 + 편집
   ▸ 변환 탭  : PDF → 이미지 / 이미지 → PDF
 """
-import sys, os, shutil, subprocess, threading, zipfile
+import sys, os, shutil, subprocess, threading, zipfile, math
 
 VERSION = "20260827.1432"                       # 배포.bat 이 자동 업데이트
 GITHUB_REPO  = "Disziplin1/pdf-tool"
@@ -148,6 +148,12 @@ DEFAULT_ANNOT_FONT  = FM
 DEFAULT_ANNOT_SIZE  = 14.0     # pt
 DEFAULT_ANNOT_COLOR = "#000000"
 DEFAULT_ANNOT_TEXT  = "텍스트"  # 새 텍스트 생성 시 기본 내용(바로 선택되어 덮어쓰기 가능)
+
+# 도형(사각형/화살표/강조) annot 기본값
+DEFAULT_SHAPE_LINE_COLOR = "#000000"
+DEFAULT_SHAPE_LINE_WIDTH = 2.0     # pt
+DEFAULT_SHAPE_FILL_COLOR = "#FFFFFF"
+DEFAULT_HIGHLIGHT_COLOR  = "#FFFF00"
 
 
 # ══════════════════════════════════════════════════════════
@@ -433,6 +439,79 @@ def _bake_text_annot(page, a, raw_w, raw_h, native_rot, font_cache):
             page.insert_text(fitz.Point(px, py), line, **kwargs)
         except Exception:
             pass
+
+
+# ══════════════════════════════════════════════════════════
+#  도형(사각형/화살표/강조) annot 공통 유틸
+#
+#  텍스트는 기준점이 하나(x,y)지만 도형은 두 점(x0,y0)-(x1,y1) 으로
+#  경계상자를 나타낸다. 사각형/강조는 항상 x0<x1, y0<y1 로 정규화해
+#  저장하지만, 화살표는 시작->끝 방향이 의미가 있으므로 정규화하지
+#  않는다.
+# ══════════════════════════════════════════════════════════
+def _annot_ref_point(a):
+    """드래그 이동 오프셋 계산에 쓸 기준점."""
+    if a.get("type") == "text":
+        return a["x"], a["y"]
+    return a["x0"], a["y0"]
+
+
+def _move_annot_to(a, ref_x, ref_y):
+    """_annot_ref_point() 로 얻은 기준점을 새 위치로 옮긴다. 도형은
+    폭/높이/방향을 그대로 유지한 채 통째로 평행이동한다."""
+    if a.get("type") == "text":
+        a["x"], a["y"] = ref_x, ref_y
+    else:
+        dx, dy = ref_x - a["x0"], ref_y - a["y0"]
+        a["x0"] += dx; a["y0"] += dy
+        a["x1"] += dx; a["y1"] += dy
+
+
+def _draw_arrow_pdf(page, p0, p1, color, line_width):
+    """PyMuPDF 페이지에 화살표(직선 + 삼각형 화살촉)를 그린다."""
+    page.draw_line(p0, p1, color=color, width=line_width)
+    dx, dy = p1.x - p0.x, p1.y - p0.y
+    length = math.hypot(dx, dy)
+    if length < 1e-6:
+        return
+    ux, uy = dx / length, dy / length
+    head_len = max(8.0, line_width * 4)
+    head_w   = max(5.0, line_width * 2.5)
+    bx, by = p1.x - ux * head_len, p1.y - uy * head_len
+    px, py = -uy, ux   # 진행방향에 수직인 단위벡터
+    left  = fitz.Point(bx + px * head_w, by + py * head_w)
+    right = fitz.Point(bx - px * head_w, by - py * head_w)
+    page.draw_polyline([p1, left, right], color=color, fill=color,
+                        width=0, closePath=True)
+
+
+def _bake_shape_annot(page, a, raw_w, raw_h, native_rot):
+    """사각형/화살표/강조 annot 하나를 실제 PDF 콘텐츠로 굽는다."""
+    x0, y0, x1, y1 = a["x0"], a["y0"], a["x1"], a["y1"]
+    if native_rot:
+        x0, y0 = unrotate_point_pt(x0, y0, raw_w, raw_h, native_rot)
+        x1, y1 = unrotate_point_pt(x1, y1, raw_w, raw_h, native_rot)
+
+    t = a.get("type")
+    try:
+        if t == "rect":
+            rect = fitz.Rect(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+            fill = (_color_hex_to_rgb01(a.get("fill_color", DEFAULT_SHAPE_FILL_COLOR))
+                    if a.get("fill_enabled") else None)
+            page.draw_rect(rect,
+                color=_color_hex_to_rgb01(a.get("line_color", DEFAULT_SHAPE_LINE_COLOR)),
+                fill=fill, width=a.get("line_width", DEFAULT_SHAPE_LINE_WIDTH))
+        elif t == "arrow":
+            _draw_arrow_pdf(page, fitz.Point(x0, y0), fitz.Point(x1, y1),
+                _color_hex_to_rgb01(a.get("line_color", DEFAULT_SHAPE_LINE_COLOR)),
+                a.get("line_width", DEFAULT_SHAPE_LINE_WIDTH))
+        elif t == "highlight":
+            rect = fitz.Rect(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+            hl = page.add_highlight_annot(rect)
+            hl.set_colors(stroke=_color_hex_to_rgb01(a.get("fill_color", DEFAULT_HIGHLIGHT_COLOR)))
+            hl.update()
+    except Exception:
+        pass
 
 
 # ══════════════════════════════════════════════════════════
@@ -724,6 +803,208 @@ class TextPropPanel(tk.Frame):
 
 
 # ══════════════════════════════════════════════════════════
+#  도형(사각형/화살표/강조) 속성 패널
+# ══════════════════════════════════════════════════════════
+class ShapePropPanel(tk.Frame):
+    def __init__(self, master, owner):
+        super().__init__(master, bg=PANEL, width=230)
+        self.owner = owner
+        self.annot = None
+        self.page_h_pt = None
+        self.pack_propagate(False)
+        self._build()
+
+    def _build(self):
+        pad = dict(padx=14)
+        self.title_lbl = tk.Label(self, text="도형 속성", font=FONT_B, bg=PANEL, fg=TEXT)
+        self.title_lbl.pack(anchor="w", padx=14, pady=(12,4))
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=14, pady=(0,8))
+
+        # ── 위치/크기 (X0/Y0/X1/Y1, mm) ────────────────────
+        tk.Label(self, text="위치/크기 (기준: 페이지 좌측 하단)", font=FONT_S,
+                 bg=PANEL, fg=TEXT_DIM).pack(anchor="w", padx=14, pady=(4,2))
+
+        def mkrow(label):
+            row = tk.Frame(self, bg=PANEL); row.pack(fill="x", padx=14, pady=(2,0))
+            tk.Label(row, text=label, font=FONT_S, bg=PANEL, fg=TEXT, width=2).pack(side="left")
+            var = tk.StringVar()
+            e = tk.Entry(row, textvariable=var, font=FONT, width=9, bg="white", fg=TEXT)
+            e.pack(side="left")
+            tk.Label(row, text="mm", font=FONT_XS, bg=PANEL, fg=TEXT_DIM).pack(side="left", padx=(4,0))
+            e.bind("<Return>",   lambda ev: self._apply_geom())
+            e.bind("<FocusOut>", lambda ev: self._apply_geom())
+            return var
+
+        self.x0_var = mkrow("X0")
+        self.y0_var = mkrow("Y0")
+        self.x1_var = mkrow("X1")
+        self.y1_var = mkrow("Y1")
+
+        self.page_size_lbl = tk.Label(self, text="", font=FONT_XS, bg=PANEL, fg=TEXT_DIM)
+        self.page_size_lbl.pack(anchor="w", padx=14, pady=(2,8))
+
+        # ── 선 색상/굵기 (사각형/화살표) ────────────────────
+        self.line_frame = tk.Frame(self, bg=PANEL)
+        tk.Label(self.line_frame, text="선", font=FONT_S, bg=PANEL, fg=TEXT_DIM)\
+            .pack(anchor="w", padx=14)
+        lrow = tk.Frame(self.line_frame, bg=PANEL); lrow.pack(fill="x", padx=14, pady=(2,8))
+        self.line_color_btn = tk.Button(lrow, text="   ", bg=DEFAULT_SHAPE_LINE_COLOR, width=4,
+                                         relief="flat", bd=1, cursor="hand2", command=self._pick_line_color)
+        self.line_color_btn.pack(side="left")
+        self.line_width_var = tk.StringVar()
+        e_lw = tk.Entry(lrow, textvariable=self.line_width_var, font=FONT, width=5, bg="white", fg=TEXT)
+        e_lw.pack(side="left", padx=(8,2))
+        tk.Label(lrow, text="pt 굵기", font=FONT_XS, bg=PANEL, fg=TEXT_DIM).pack(side="left")
+        e_lw.bind("<Return>",   lambda e: self._apply_line_width())
+        e_lw.bind("<FocusOut>", lambda e: self._apply_line_width())
+
+        # ── 채움 (사각형 전용) ──────────────────────────────
+        self.fill_frame = tk.Frame(self, bg=PANEL)
+        frow = tk.Frame(self.fill_frame, bg=PANEL); frow.pack(fill="x", padx=10, pady=(0,8))
+        self.fill_enabled_var = tk.BooleanVar()
+        tk.Checkbutton(frow, text="채움", variable=self.fill_enabled_var, command=self._apply_fill_enabled,
+                       bg=PANEL, fg=TEXT, selectcolor=ACCENT, activebackground=PANEL,
+                       font=FONT_S, bd=0, highlightthickness=0).pack(side="left", padx=4)
+        self.fill_color_btn = tk.Button(frow, text="   ", bg=DEFAULT_SHAPE_FILL_COLOR, width=4,
+                                         relief="flat", bd=1, cursor="hand2", command=self._pick_fill_color)
+        self.fill_color_btn.pack(side="left", padx=8)
+
+        # ── 강조 색상 (강조 전용) ───────────────────────────
+        self.highlight_frame = tk.Frame(self, bg=PANEL)
+        hrow = tk.Frame(self.highlight_frame, bg=PANEL); hrow.pack(fill="x", padx=14, pady=(0,8))
+        tk.Label(hrow, text="강조 색상", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(side="left")
+        self.highlight_color_btn = tk.Button(hrow, text="   ", bg=DEFAULT_HIGHLIGHT_COLOR, width=4,
+                                              relief="flat", bd=1, cursor="hand2", command=self._pick_highlight_color)
+        self.highlight_color_btn.pack(side="left", padx=8)
+
+        # ── 삭제 ────────────────────────────────────────────
+        self._delete_sep = tk.Frame(self, bg=BORDER, height=1)
+        self._delete_sep.pack(fill="x", padx=14, pady=(4,10))
+        tk.Button(self, text="🗑 이 도형 삭제", command=self._delete_shape,
+                  bg=DANGER, fg="white", font=FONT, relief="flat",
+                  padx=12, pady=7, cursor="hand2", bd=0,
+                  activebackground=_shade(DANGER, 0.9)).pack(fill="x", padx=14, pady=(0,14))
+
+    # ── annot 표시 ────────────────────────────────────────
+    def show_annot(self, annot, page_w_pt, page_h_pt):
+        self.annot = annot
+        self.page_h_pt = page_h_pt
+        if annot is None:
+            return
+        t = annot.get("type")
+        self.title_lbl.config(text={
+            "rect": "사각형 속성", "arrow": "화살표 속성", "highlight": "강조 속성",
+        }.get(t, "도형 속성"))
+        self.refresh_xy_only()
+
+        self.line_frame.pack_forget()
+        self.fill_frame.pack_forget()
+        self.highlight_frame.pack_forget()
+        if t in ("rect", "arrow"):
+            self.line_color_btn.config(bg=annot.get("line_color", DEFAULT_SHAPE_LINE_COLOR))
+            self.line_width_var.set(f"{annot.get('line_width', DEFAULT_SHAPE_LINE_WIDTH):.1f}")
+            self.line_frame.pack(fill="x", before=self._delete_sep)
+        if t == "rect":
+            self.fill_enabled_var.set(bool(annot.get("fill_enabled", False)))
+            self.fill_color_btn.config(bg=annot.get("fill_color", DEFAULT_SHAPE_FILL_COLOR))
+            self.fill_frame.pack(fill="x", before=self._delete_sep)
+        if t == "highlight":
+            self.highlight_color_btn.config(bg=annot.get("fill_color", DEFAULT_HIGHLIGHT_COLOR))
+            self.highlight_frame.pack(fill="x", before=self._delete_sep)
+
+        if page_w_pt and page_h_pt:
+            self.page_size_lbl.config(
+                text=f"페이지 크기: {pt_to_mm(page_w_pt):.2f} × {pt_to_mm(page_h_pt):.2f} mm")
+        else:
+            self.page_size_lbl.config(text="")
+
+    def refresh_xy_only(self):
+        if self.annot is None: return
+        self.x0_var.set(f"{pt_to_mm(self.annot['x0']):.2f}")
+        self.x1_var.set(f"{pt_to_mm(self.annot['x1']):.2f}")
+        self.y0_var.set(f"{self._y_pt_to_disp_mm(self.annot['y0']):.2f}")
+        self.y1_var.set(f"{self._y_pt_to_disp_mm(self.annot['y1']):.2f}")
+
+    # 텍스트 속성 패널(TextPropPanel)과 동일한 좌하단 원점 표시 변환
+    def _y_pt_to_disp_mm(self, y_pt):
+        if self.page_h_pt:
+            return pt_to_mm(self.page_h_pt) - pt_to_mm(y_pt)
+        return pt_to_mm(y_pt)
+
+    def _disp_mm_to_y_pt(self, y_disp_mm):
+        if self.page_h_pt:
+            return mm_to_pt(pt_to_mm(self.page_h_pt) - y_disp_mm)
+        return mm_to_pt(y_disp_mm)
+
+    def _apply_geom(self):
+        if self.annot is None: return
+        try:
+            x0 = mm_to_pt(float(self.x0_var.get()))
+            x1 = mm_to_pt(float(self.x1_var.get()))
+            y0 = self._disp_mm_to_y_pt(float(self.y0_var.get()))
+            y1 = self._disp_mm_to_y_pt(float(self.y1_var.get()))
+        except ValueError:
+            messagebox.showwarning("잘못된 값", "X0/Y0/X1/Y1 은 숫자(mm)로 입력해주세요.", parent=self)
+            self.refresh_xy_only()
+            return
+        self.annot["x0"], self.annot["x1"] = x0, x1
+        self.annot["y0"], self.annot["y1"] = y0, y1
+        self.refresh_xy_only()
+        self.owner._on_annot_prop_changed()
+
+    def _apply_line_width(self):
+        if self.annot is None: return
+        try:
+            w = float(self.line_width_var.get())
+            if w <= 0: raise ValueError
+        except ValueError:
+            messagebox.showwarning("잘못된 값", "굵기는 0보다 큰 숫자(pt)로 입력해주세요.", parent=self)
+            self.line_width_var.set(f"{self.annot.get('line_width', DEFAULT_SHAPE_LINE_WIDTH):.1f}")
+            return
+        self.annot["line_width"] = w
+        self.owner._on_annot_prop_changed()
+
+    def _apply_fill_enabled(self):
+        if self.annot is None: return
+        self.annot["fill_enabled"] = bool(self.fill_enabled_var.get())
+        self.owner._on_annot_prop_changed()
+
+    def _pick_line_color(self):
+        if self.annot is None: return
+        from tkinter import colorchooser
+        cur = self.annot.get("line_color", DEFAULT_SHAPE_LINE_COLOR)
+        _, hexcol = colorchooser.askcolor(color=cur, parent=self, title="선 색상 선택")
+        if hexcol:
+            self.annot["line_color"] = hexcol
+            self.line_color_btn.config(bg=hexcol)
+            self.owner._on_annot_prop_changed()
+
+    def _pick_fill_color(self):
+        if self.annot is None: return
+        from tkinter import colorchooser
+        cur = self.annot.get("fill_color", DEFAULT_SHAPE_FILL_COLOR)
+        _, hexcol = colorchooser.askcolor(color=cur, parent=self, title="채움 색상 선택")
+        if hexcol:
+            self.annot["fill_color"] = hexcol
+            self.fill_color_btn.config(bg=hexcol)
+            self.owner._on_annot_prop_changed()
+
+    def _pick_highlight_color(self):
+        if self.annot is None: return
+        from tkinter import colorchooser
+        cur = self.annot.get("fill_color", DEFAULT_HIGHLIGHT_COLOR)
+        _, hexcol = colorchooser.askcolor(color=cur, parent=self, title="강조 색상 선택")
+        if hexcol:
+            self.annot["fill_color"] = hexcol
+            self.highlight_color_btn.config(bg=hexcol)
+            self.owner._on_annot_prop_changed()
+
+    def _delete_shape(self):
+        if self.annot is None: return
+        self.owner._delete_selected_annot()
+
+
+# ══════════════════════════════════════════════════════════
 #  미리보기 창  (크게보기 + 편집: 삭제·회전·텍스트)
 # ══════════════════════════════════════════════════════════
 class PreviewWin(tk.Toplevel):
@@ -745,6 +1026,7 @@ class PreviewWin(tk.Toplevel):
         self.tool        = "select"  # "select" | "text"
         self.selected_id = None      # 선택된 annot id
         self._move_state = None      # 드래그로 이동 중인 annot 정보
+        self._shape_draft = None     # 드래그로 도형을 새로 그리는 중인 상태(미리보기용)
         # 마지막 _show() 렌더링 기준 좌표 변환 파라미터 (screen<->pdf 변환용)
         self._sc      = None
         self._cx       = None
@@ -834,7 +1116,8 @@ class PreviewWin(tk.Toplevel):
         # ── 편집 툴바 (편집 모드일 때만 표시) ────────────
         self.edit_toolbar = tk.Frame(self, bg=TOOLBAR)
         self.tool_btns = {}
-        for key, label in [("select","🖱 선택"), ("text","T 텍스트")]:
+        for key, label in [("select","🖱 선택"), ("text","T 텍스트"),
+                           ("rect","▭ 사각형"), ("arrow","↗ 화살표"), ("highlight","🖊 강조")]:
             b = tk.Button(self.edit_toolbar, text=label,
                           command=lambda k=key: self._set_tool(k),
                           bg=TOOLBAR, fg=TEXT_DIM, font=FONT_B,
@@ -847,8 +1130,9 @@ class PreviewWin(tk.Toplevel):
         mid = tk.Frame(self, bg=BG)
         self.preview_cf = mid
         mid.pack(fill="both", expand=True)
-        # 속성 패널은 텍스트를 선택했을 때만 pack() 되어 나타난다 (17번 요구사항)
-        self.prop_panel = TextPropPanel(mid, owner=self)
+        # 속성 패널은 텍스트/도형을 선택했을 때만 pack() 되어 나타난다 (17번 요구사항)
+        self.prop_panel  = TextPropPanel(mid, owner=self)
+        self.shape_panel = ShapePropPanel(mid, owner=self)
 
         cf = tk.Frame(mid, bg=BG)
         cf.pack(side="left", fill="both", expand=True, padx=30, pady=12)
@@ -1036,6 +1320,9 @@ class PreviewWin(tk.Toplevel):
         if self.edit_mode and self.tool == "text":
             self._create_text_at(e.x, e.y)
             return
+        if self.edit_mode and self.tool in ("rect", "arrow", "highlight"):
+            self._shape_draft = {"tool": self.tool, "sx0": e.x, "sy0": e.y, "item": None}
+            return
         if self.edit_mode and self.tool == "select":
             # 속성 패널의 입력창에 포커스가 남아있으면 Delete 등 단축키가
             # 캔버스가 아니라 그 입력창으로 먼저 소비돼버린다. 캔버스를
@@ -1048,10 +1335,11 @@ class PreviewWin(tk.Toplevel):
                     px_pdf, py_pdf = screen_to_pdf(
                         e.x, e.y, self._cur_pw, self._cur_ph,
                         self._cur_rot, self._sc, self._cx, self._cy)
+                    ref_x, ref_y = _annot_ref_point(hit)
                     self._move_state = {
                         "annot_id": hit["id"],
-                        "off_x": hit["x"] - px_pdf,
-                        "off_y": hit["y"] - py_pdf,
+                        "off_x": ref_x - px_pdf,
+                        "off_y": ref_y - py_pdf,
                     }
                 return
             else:
@@ -1059,16 +1347,74 @@ class PreviewWin(tk.Toplevel):
         self._pan_start(e)
 
     def _on_canvas_motion(self, e):
+        if self._shape_draft is not None:
+            self._update_shape_draft(e)
+            return
         if self._move_state is not None:
             self._drag_annot(e)
             return
         self._pan_move(e)
 
     def _on_canvas_release(self, e):
+        if self._shape_draft is not None:
+            self._finish_shape_draft(e)
+            return
         if self._move_state is not None:
             self._move_state = None
             return
         self._pan_end(e)
+
+    # ── 도형 드래그 생성 (마우스로 크기를 직접 지정) ───────────
+    def _update_shape_draft(self, e):
+        d = self._shape_draft
+        if d["item"] is not None:
+            self.canvas.delete(d["item"])
+        x0, y0, x1, y1 = d["sx0"], d["sy0"], e.x, e.y
+        if d["tool"] == "arrow":
+            d["item"] = self.canvas.create_line(
+                x0, y0, x1, y1, fill=ACCENT, width=2, dash=(4,2),
+                arrow="last", tags=("shape_draft",))
+        else:
+            d["item"] = self.canvas.create_rectangle(
+                min(x0,x1), min(y0,y1), max(x0,x1), max(y0,y1),
+                outline=ACCENT, width=2, dash=(4,2), tags=("shape_draft",))
+
+    def _finish_shape_draft(self, e):
+        d = self._shape_draft
+        self._shape_draft = None
+        if d["item"] is not None:
+            self.canvas.delete(d["item"])
+        if self._sc is None: return
+        sx0, sy0, sx1, sy1 = d["sx0"], d["sy0"], e.x, e.y
+        if abs(sx1-sx0) < 4 and abs(sy1-sy0) < 4:
+            return   # 너무 작게 드래그하면(사실상 클릭) 도형을 만들지 않음
+        x0_pt, y0_pt = screen_to_pdf(sx0, sy0, self._cur_pw, self._cur_ph,
+                                      self._cur_rot, self._sc, self._cx, self._cy)
+        x1_pt, y1_pt = screen_to_pdf(sx1, sy1, self._cur_pw, self._cur_ph,
+                                      self._cur_rot, self._sc, self._cx, self._cy)
+        pg = self.pages[self.idx]
+        tool = d["tool"]
+        if tool == "rect":
+            annot = {"id": next(_id_gen), "type": "rect",
+                     "x0": min(x0_pt,x1_pt), "y0": min(y0_pt,y1_pt),
+                     "x1": max(x0_pt,x1_pt), "y1": max(y0_pt,y1_pt),
+                     "line_color": DEFAULT_SHAPE_LINE_COLOR, "line_width": DEFAULT_SHAPE_LINE_WIDTH,
+                     "fill_color": DEFAULT_SHAPE_FILL_COLOR, "fill_enabled": False}
+        elif tool == "highlight":
+            annot = {"id": next(_id_gen), "type": "highlight",
+                     "x0": min(x0_pt,x1_pt), "y0": min(y0_pt,y1_pt),
+                     "x1": max(x0_pt,x1_pt), "y1": max(y0_pt,y1_pt),
+                     "fill_color": DEFAULT_HIGHLIGHT_COLOR}
+        else:   # arrow: 시작->끝 방향이 의미가 있으므로 정규화하지 않음
+            annot = {"id": next(_id_gen), "type": "arrow",
+                     "x0": x0_pt, "y0": y0_pt, "x1": x1_pt, "y1": y1_pt,
+                     "line_color": DEFAULT_SHAPE_LINE_COLOR, "line_width": DEFAULT_SHAPE_LINE_WIDTH}
+        pg.setdefault("annots", []).append(annot)
+        self._select_annot(annot["id"])
+        if self.on_change: self.on_change()
+        # 텍스트와 마찬가지로, 하나 만들고 나면 선택 도구로 자동 전환해서
+        # 이어지는 드래그가 계속 새 도형을 만들지 않게 한다.
+        self._set_tool("select")
 
     # ── 팬(이동) ─────────────────────────────────────────────
     def _pan_start(self, e):
@@ -1121,7 +1467,13 @@ class PreviewWin(tk.Toplevel):
             active = (k == key)
             b.config(bg=ACCENT if active else TOOLBAR,
                      fg="white" if active else TEXT_DIM)
-        self.canvas.config(cursor="xterm" if key == "text" else "")
+        if key == "text":
+            cursor = "xterm"
+        elif key in ("rect", "arrow", "highlight"):
+            cursor = "crosshair"
+        else:
+            cursor = ""
+        self.canvas.config(cursor=cursor)
 
     def _focus_in_entry(self):
         """속성 패널의 입력창에 포커스가 있는지 확인 (단축키 충돌 방지용)."""
@@ -1130,15 +1482,27 @@ class PreviewWin(tk.Toplevel):
 
     # ── annot(텍스트) 선택/생성/이동/삭제 ─────────────────────
     def _hit_test(self, ex, ey):
-        """캔버스 좌표(ex,ey) 위에 있는 현재 페이지의 annot 을 찾는다."""
+        """캔버스 좌표(ex,ey) 위에 있는 현재 페이지의 annot 을 찾는다.
+        사각형/강조처럼 채우기가 없을 수 있는 도형은 Tk 캔버스 자체
+        히트테스트(find_overlapping)가 빈 내부를 "아이템 없음"으로
+        취급해버리므로(채워진 경우에만 내부 클릭이 히트로 잡힘), 그
+        두 타입은 화면 좌표 bbox 로 직접 판정한다."""
         pg = self.pages[self.idx]
-        annots = {a["id"]: a for a in pg.get("annots", [])}
+        annots = pg.get("annots", [])
+        if self._sc is not None:
+            for a in reversed(annots):
+                if a.get("type") in ("rect", "highlight"):
+                    sx0, sy0, sx1, sy1 = self._shape_screen_corners(a)
+                    if (min(sx0,sx1)-2 <= ex <= max(sx0,sx1)+2 and
+                            min(sy0,sy1)-2 <= ey <= max(sy0,sy1)+2):
+                        return a
+        lookup = {a["id"]: a for a in annots}
         for item in reversed(self.canvas.find_overlapping(ex-2, ey-2, ex+2, ey+2)):
             for t in self.canvas.gettags(item):
                 if t.startswith("annot_"):
                     aid = int(t.split("_")[1])
-                    if aid in annots:
-                        return annots[aid]
+                    if aid in lookup:
+                        return lookup[aid]
         return None
 
     def _cur_page(self):
@@ -1163,12 +1527,13 @@ class PreviewWin(tk.Toplevel):
     def _select_annot(self, aid):
         self.selected_id = aid
         annot = self._find_annot(aid) if aid is not None else None
-        if annot is None:
-            self.prop_panel.pack_forget()
-        else:
+        self.prop_panel.pack_forget()
+        self.shape_panel.pack_forget()
+        if annot is not None:
             pg = self._cur_page()
-            self.prop_panel.show_annot(annot, pg.get("page_w_pt"), pg.get("page_h_pt"))
-            self.prop_panel.pack(side="right", fill="y")
+            panel = self.prop_panel if annot.get("type") == "text" else self.shape_panel
+            panel.show_annot(annot, pg.get("page_w_pt"), pg.get("page_h_pt"))
+            panel.pack(side="right", fill="y")
         self._redraw_annots()
 
     def _on_annot_prop_changed(self):
@@ -1206,9 +1571,11 @@ class PreviewWin(tk.Toplevel):
         if a is None: return
         px_pdf, py_pdf = screen_to_pdf(e.x, e.y, self._cur_pw, self._cur_ph,
                                         self._cur_rot, self._sc, self._cx, self._cy)
-        a["x"] = px_pdf + self._move_state["off_x"]
-        a["y"] = py_pdf + self._move_state["off_y"]
-        self.prop_panel.refresh_xy_only()
+        ref_x = px_pdf + self._move_state["off_x"]
+        ref_y = py_pdf + self._move_state["off_y"]
+        _move_annot_to(a, ref_x, ref_y)
+        panel = self.prop_panel if a.get("type") == "text" else self.shape_panel
+        panel.refresh_xy_only()
         self._redraw_annots()
 
     def _delete_selected_annot(self, e=None):
@@ -1217,42 +1584,90 @@ class PreviewWin(tk.Toplevel):
         pg["annots"] = [a for a in pg.get("annots", []) if a["id"] != self.selected_id]
         self.selected_id = None
         self.prop_panel.pack_forget()
+        self.shape_panel.pack_forget()
         self._redraw_annots()
         if self.on_change: self.on_change()
 
     def _draw_annots(self, pg):
         for a in pg.get("annots", []):
-            if a.get("type") != "text": continue
-            px, py = pdf_to_screen(a["x"], a["y"], self._cur_pw, self._cur_ph,
-                                    self._cur_rot, self._sc, self._cx, self._cy)
-            style_parts = []
-            if a.get("bold"):   style_parts.append("bold")
-            if a.get("italic"): style_parts.append("italic")
-            style = " ".join(style_parts) if style_parts else "normal"
-            size_pt = a.get("font_size", DEFAULT_ANNOT_SIZE)
-            size_px = max(1, int(round(size_pt * self._sc)))   # 음수=픽셀 크기(줌에 정확히 비례)
-            font_spec = (a.get("font", DEFAULT_ANNOT_FONT), -size_px, style)
-            # 텍스트 자체 회전(annot["rotation"])과 페이지 회전(pg["rot"])은
-            # 서로 별개의 값이며 섞이지 않는다. tk canvas 의 angle 은
-            # 반시계방향(+)이라, 이 프로그램의 페이지 회전 규약(시계방향 +)과
-            # 표시 방향을 통일하기 위해 부호를 반전해서 넘긴다.
-            angle = (-a.get("rotation", 0.0)) % 360
-            try:
-                item = self.canvas.create_text(
-                    px, py, text=a.get("text", ""), anchor="nw",
-                    font=font_spec, fill=a.get("color", DEFAULT_ANNOT_COLOR),
-                    justify=a.get("align", "left"), angle=angle,
-                    tags=(f"annot_{a['id']}", "annot"))
-            except Exception:
-                continue
-            if self.edit_mode and a["id"] == self.selected_id:
-                bbox = self.canvas.bbox(item)
-                if bbox:
-                    pad = 4
-                    self.canvas.create_rectangle(
-                        bbox[0]-pad, bbox[1]-pad, bbox[2]+pad, bbox[3]+pad,
-                        outline=ACCENT, width=2, dash=(4,2),
-                        tags=("annot", "annotsel"))
+            t = a.get("type")
+            if t == "text":
+                self._draw_text_annot(a)
+            elif t == "rect":
+                self._draw_rect_annot(a)
+            elif t == "highlight":
+                self._draw_highlight_annot(a)
+            elif t == "arrow":
+                self._draw_arrow_annot(a)
+
+    def _draw_text_annot(self, a):
+        px, py = pdf_to_screen(a["x"], a["y"], self._cur_pw, self._cur_ph,
+                                self._cur_rot, self._sc, self._cx, self._cy)
+        style_parts = []
+        if a.get("bold"):   style_parts.append("bold")
+        if a.get("italic"): style_parts.append("italic")
+        style = " ".join(style_parts) if style_parts else "normal"
+        size_pt = a.get("font_size", DEFAULT_ANNOT_SIZE)
+        size_px = max(1, int(round(size_pt * self._sc)))   # 음수=픽셀 크기(줌에 정확히 비례)
+        font_spec = (a.get("font", DEFAULT_ANNOT_FONT), -size_px, style)
+        # 텍스트 자체 회전(annot["rotation"])과 페이지 회전(pg["rot"])은
+        # 서로 별개의 값이며 섞이지 않는다. tk canvas 의 angle 은
+        # 반시계방향(+)이라, 이 프로그램의 페이지 회전 규약(시계방향 +)과
+        # 표시 방향을 통일하기 위해 부호를 반전해서 넘긴다.
+        angle = (-a.get("rotation", 0.0)) % 360
+        try:
+            item = self.canvas.create_text(
+                px, py, text=a.get("text", ""), anchor="nw",
+                font=font_spec, fill=a.get("color", DEFAULT_ANNOT_COLOR),
+                justify=a.get("align", "left"), angle=angle,
+                tags=(f"annot_{a['id']}", "annot"))
+        except Exception:
+            return
+        self._draw_sel_outline_if_needed(a, item)
+
+    def _shape_screen_corners(self, a):
+        sx0, sy0 = pdf_to_screen(a["x0"], a["y0"], self._cur_pw, self._cur_ph,
+                                  self._cur_rot, self._sc, self._cx, self._cy)
+        sx1, sy1 = pdf_to_screen(a["x1"], a["y1"], self._cur_pw, self._cur_ph,
+                                  self._cur_rot, self._sc, self._cx, self._cy)
+        return sx0, sy0, sx1, sy1
+
+    def _draw_rect_annot(self, a):
+        sx0, sy0, sx1, sy1 = self._shape_screen_corners(a)
+        lw = max(1, int(round(a.get("line_width", DEFAULT_SHAPE_LINE_WIDTH) * self._sc)))
+        fill = a.get("fill_color", DEFAULT_SHAPE_FILL_COLOR) if a.get("fill_enabled") else ""
+        item = self.canvas.create_rectangle(
+            min(sx0,sx1), min(sy0,sy1), max(sx0,sx1), max(sy0,sy1),
+            outline=a.get("line_color", DEFAULT_SHAPE_LINE_COLOR), width=lw, fill=fill,
+            tags=(f"annot_{a['id']}", "annot"))
+        self._draw_sel_outline_if_needed(a, item)
+
+    def _draw_highlight_annot(self, a):
+        sx0, sy0, sx1, sy1 = self._shape_screen_corners(a)
+        item = self.canvas.create_rectangle(
+            min(sx0,sx1), min(sy0,sy1), max(sx0,sx1), max(sy0,sy1),
+            outline="", fill=a.get("fill_color", DEFAULT_HIGHLIGHT_COLOR), stipple="gray50",
+            tags=(f"annot_{a['id']}", "annot"))
+        self._draw_sel_outline_if_needed(a, item)
+
+    def _draw_arrow_annot(self, a):
+        sx0, sy0, sx1, sy1 = self._shape_screen_corners(a)
+        lw = max(1, int(round(a.get("line_width", DEFAULT_SHAPE_LINE_WIDTH) * self._sc)))
+        item = self.canvas.create_line(
+            sx0, sy0, sx1, sy1, fill=a.get("line_color", DEFAULT_SHAPE_LINE_COLOR),
+            width=lw, arrow="last", arrowshape=(10,12,4),
+            tags=(f"annot_{a['id']}", "annot"))
+        self._draw_sel_outline_if_needed(a, item)
+
+    def _draw_sel_outline_if_needed(self, a, item):
+        if self.edit_mode and a["id"] == self.selected_id:
+            bbox = self.canvas.bbox(item)
+            if bbox:
+                pad = 4
+                self.canvas.create_rectangle(
+                    bbox[0]-pad, bbox[1]-pad, bbox[2]+pad, bbox[3]+pad,
+                    outline=ACCENT, width=2, dash=(4,2),
+                    tags=("annot", "annotsel"))
 
     # ── 편집 ────────────────────────────────────────────────
     def _rotate(self, deg):
@@ -1861,6 +2276,8 @@ class OrganizeTab(tk.Frame):
                     for a in annots:
                         if a.get("type") == "text":
                             _bake_text_annot(out_page, a, raw_w, raw_h, native_rot, font_cache)
+                        elif a.get("type") in ("rect", "arrow", "highlight"):
+                            _bake_shape_annot(out_page, a, raw_w, raw_h, native_rot)
             out_doc.save(out)
         finally:
             out_doc.close()
