@@ -308,6 +308,7 @@ class TextPropPanel(tk.Frame):
         super().__init__(master, bg=PANEL, width=230)
         self.owner = owner          # PreviewWin 인스턴스 (변경 통지용)
         self.annot = None
+        self.page_h_pt = None       # Y 표시를 좌하단 원점으로 뒤집는 데 필요
         self.pack_propagate(False)  # 내용과 무관하게 폭 고정
         self._build()
 
@@ -326,7 +327,7 @@ class TextPropPanel(tk.Frame):
         self.content_entry.bind("<FocusOut>", lambda e: self._apply_text())
 
         # ── 위치 (X/Y, mm) ───────────────────────────────
-        tk.Label(self, text="위치 (기준: 페이지 좌측 상단)", font=FONT_S,
+        tk.Label(self, text="위치 (기준: 페이지 좌측 하단)", font=FONT_S,
                  bg=PANEL, fg=TEXT_DIM).pack(anchor="w", padx=14, pady=(4,2))
         tk.Label(self, text="↑↓ 또는 휠로 미세조정 (Shift=1mm)", font=FONT_XS,
                  bg=PANEL, fg=TEXT_DIM).pack(anchor="w", padx=14)
@@ -438,11 +439,12 @@ class TextPropPanel(tk.Frame):
     # ── annot 표시 ────────────────────────────────────────
     def show_annot(self, annot, page_w_pt, page_h_pt):
         self.annot = annot
+        self.page_h_pt = page_h_pt
         if annot is None:
             return
         self.text_var.set(annot.get("text", ""))
         self.x_var.set(f"{pt_to_mm(annot['x']):.2f}")
-        self.y_var.set(f"{pt_to_mm(annot['y']):.2f}")
+        self.y_var.set(f"{self._y_pt_to_disp_mm(annot['y']):.2f}")
         font_name = annot.get("font", DEFAULT_ANNOT_FONT)
         self.font_var.set(font_name if font_name in self.font_combo["values"] else DEFAULT_ANNOT_FONT)
         self.size_var.set(f"{annot.get('font_size', DEFAULT_ANNOT_SIZE):.2f}")
@@ -466,7 +468,23 @@ class TextPropPanel(tk.Frame):
         X/Y 표시만 갱신한다 (양방향 동기화, 8번 요구사항)."""
         if self.annot is None: return
         self.x_var.set(f"{pt_to_mm(self.annot['x']):.2f}")
-        self.y_var.set(f"{pt_to_mm(self.annot['y']):.2f}")
+        self.y_var.set(f"{self._y_pt_to_disp_mm(self.annot['y']):.2f}")
+
+    # ── Y 좌표 표시 변환 ────────────────────────────────────
+    # 내부 저장(annot["y"])은 렌더링/회전 계산과 맞추기 위해 좌상단 원점 +
+    # Y 아래로 증가하는 편집 좌표계를 그대로 쓰지만, 화면에 보여주는 X/Y
+    # 입력창은 사용자에게 익숙한 PDF 표준 관례(좌하단 원점, Y 위로 증가)로
+    # 표시한다. 페이지 높이를 기준으로 뒤집기만 하면 되고, X 는 두 좌표계에서
+    # 동일하므로 변환이 필요 없다.
+    def _y_pt_to_disp_mm(self, y_pt):
+        if self.page_h_pt:
+            return pt_to_mm(self.page_h_pt) - pt_to_mm(y_pt)
+        return pt_to_mm(y_pt)
+
+    def _disp_mm_to_y_pt(self, y_disp_mm):
+        if self.page_h_pt:
+            return mm_to_pt(pt_to_mm(self.page_h_pt) - y_disp_mm)
+        return mm_to_pt(y_disp_mm)
 
     def focus_content_for_edit(self):
         """새 텍스트 생성 직후 '내용' 입력창에 포커스를 옮기고 전체 선택해서
@@ -506,9 +524,10 @@ class TextPropPanel(tk.Frame):
             messagebox.showwarning("잘못된 값", "X/Y 는 숫자(mm)로 입력해주세요.", parent=self)
             self.refresh_xy_only()
             return
-        # 내부 저장은 항상 pt, 정밀도를 그대로 유지한다 (화면 표시만 반올림)
+        # 내부 저장은 항상 pt, 정밀도를 그대로 유지한다 (화면 표시만 반올림).
+        # Y 는 입력창에 좌하단 원점 기준으로 표시되므로 내부 좌표로 되돌린다.
         self.annot["x"] = mm_to_pt(x_mm)
-        self.annot["y"] = mm_to_pt(y_mm)
+        self.annot["y"] = self._disp_mm_to_y_pt(y_mm)
         self.refresh_xy_only()
         self.owner._on_annot_prop_changed()
 
@@ -621,8 +640,18 @@ class PreviewWin(tk.Toplevel):
         # 속성 패널의 입력창(Entry/Combobox)에 포커스가 있을 때는 아래
         # 단축키들이 가로채면 안 된다 (예: X 좌표에 "-999" 를 입력하려는데
         # "-" 가 축소 단축키로 먼저 소비되는 문제 방지).
-        self.bind("<Left>",       lambda e: None if self._focus_in_entry() else self._go(-1))
-        self.bind("<Right>",      lambda e: None if self._focus_in_entry() else self._go(1))
+        # 텍스트를 선택한 상태에서는 방향키가 페이지 이동 대신 그 텍스트를
+        # 바로 이동시킨다 (캔버스를 클릭해 선택하면 포커스가 캔버스로 옮겨가
+        # X/Y 입력창에 없기 때문에, 입력창에 포커스가 있을 때만 쓰던 방향키
+        # 미세조정이 그 경우엔 전혀 동작하지 않았던 문제를 해결).
+        self.bind("<Left>",       lambda e: None if self._focus_in_entry() else self._on_key_left())
+        self.bind("<Right>",      lambda e: None if self._focus_in_entry() else self._on_key_right())
+        self.bind("<Up>",         lambda e: None if self._focus_in_entry() else self._nudge_selected_y(0.1))
+        self.bind("<Down>",       lambda e: None if self._focus_in_entry() else self._nudge_selected_y(-0.1))
+        self.bind("<Shift-Left>", lambda e: None if self._focus_in_entry() else self._nudge_selected_x(-1.0))
+        self.bind("<Shift-Right>",lambda e: None if self._focus_in_entry() else self._nudge_selected_x(1.0))
+        self.bind("<Shift-Up>",   lambda e: None if self._focus_in_entry() else self._nudge_selected_y(1.0))
+        self.bind("<Shift-Down>", lambda e: None if self._focus_in_entry() else self._nudge_selected_y(-1.0))
         # Esc 로 창이 닫히지 않게 한다 — 텍스트 입력 중 실수로 창 전체가
         # 닫히는 문제가 있어, 미리보기 창은 우측 상단 ✕ 버튼으로만 닫는다.
         self.bind("<plus>",       lambda e: None if self._focus_in_entry() else self._zoom(1.25))
@@ -638,17 +667,27 @@ class PreviewWin(tk.Toplevel):
         self.title_lbl = tk.Label(top, text="", font=FONT_B,
                                   bg=BG, fg=TEXT)
         self.title_lbl.pack(side="left")
-        tk.Button(top, text="✕", command=self.destroy,
-                  bg=BG, fg=TEXT_DIM, font=(FM, 14),
-                  relief="flat", bd=0, cursor="hand2",
-                  activebackground=BG).pack(side="right")
-        # 네이티브 창 컨트롤(최대화/복원 버튼)처럼 아이콘만 있는 작은 버튼으로,
-        # ✕ 버튼 바로 옆에 배치한다. 시작이 전체화면이므로 강조색으로 표시.
-        self.fullscreen_btn = tk.Button(top, text="□", command=self._toggle_fullscreen,
-                  bg=BG, fg=ACCENT, font=(FM, 13),
-                  relief="flat", bd=0, cursor="hand2",
-                  activebackground=BG)
-        self.fullscreen_btn.pack(side="right", padx=(0,6))
+        # ── 창 컨트롤(최대화/닫기) — Windows 기본 타이틀바처럼 버튼끼리
+        # 서로 붙은 넓은 사각형 버튼 + 마우스오버 시 배경 강조.
+        winctl = tk.Frame(top, bg=BG)
+        winctl.pack(side="right")
+
+        self.close_btn = tk.Button(winctl, text="✕", command=self.destroy,
+                  bg=BG, fg=TEXT_DIM, font=(FM, 12),
+                  relief="flat", bd=0, highlightthickness=0,
+                  cursor="hand2", width=4, pady=8)
+        self.close_btn.pack(side="right")
+        self.close_btn.bind("<Enter>", lambda e: self.close_btn.config(bg="#E81123", fg="white"))
+        self.close_btn.bind("<Leave>", lambda e: self.close_btn.config(bg=BG, fg=TEXT_DIM))
+
+        # 시작이 전체화면이므로 강조색으로 표시 (호버 배경과는 별개로 유지).
+        self.fullscreen_btn = tk.Button(winctl, text="□", command=self._toggle_fullscreen,
+                  bg=BG, fg=ACCENT, font=(FM, 11),
+                  relief="flat", bd=0, highlightthickness=0,
+                  cursor="hand2", width=4, pady=8)
+        self.fullscreen_btn.pack(side="right")
+        self.fullscreen_btn.bind("<Enter>", lambda e: self.fullscreen_btn.config(bg=_shade(BG, 0.9)))
+        self.fullscreen_btn.bind("<Leave>", lambda e: self.fullscreen_btn.config(bg=BG))
         self.edit_btn = tk.Button(top, text="✎ 편집 모드", command=self._toggle_edit,
                   bg=TOOLBAR, fg=TEXT_DIM, font=FONT_B,
                   relief="flat", padx=12, pady=5, cursor="hand2",
@@ -827,6 +866,27 @@ class PreviewWin(tk.Toplevel):
         self.zoom = max(0.25, min(4.0, self.zoom * factor))
         self.zoom_lbl.config(text=f"{int(self.zoom*100)}%")
         self._show()
+
+    # ── 방향키: 선택된 텍스트가 있으면 이동, 없으면 페이지 이동 ─────
+    def _on_key_left(self):
+        if self.edit_mode and self.selected_id is not None:
+            self._nudge_selected_x(-0.1)
+        else:
+            self._go(-1)
+
+    def _on_key_right(self):
+        if self.edit_mode and self.selected_id is not None:
+            self._nudge_selected_x(0.1)
+        else:
+            self._go(1)
+
+    def _nudge_selected_x(self, delta_mm):
+        if self.selected_id is None: return
+        self.prop_panel._nudge_x(delta_mm)
+
+    def _nudge_selected_y(self, delta_mm):
+        if self.selected_id is None: return
+        self.prop_panel._nudge_y(delta_mm)
 
     def _zoom_reset(self):
         self.zoom  = 1.0

@@ -455,8 +455,11 @@ class TestPropertyPanel(unittest.TestCase):
         panel.y_var.set("35.00")
         panel._apply_xy()
 
+        # Y 입력창은 좌하단 원점 기준으로 표시되므로, 내부 저장(좌상단 원점)
+        # 값은 페이지 높이에서 뺀 값이어야 한다.
+        page_h_mm = pt.pt_to_mm(panel.page_h_pt)
         self.assertAlmostEqual(annot["x"], pt.mm_to_pt(125.00), places=6)
-        self.assertAlmostEqual(annot["y"], pt.mm_to_pt(35.00), places=6)
+        self.assertAlmostEqual(annot["y"], pt.mm_to_pt(page_h_mm - 35.00), places=6)
         # 다시 표시했을 때 0.01mm 정밀도로 원래 값이 보여야 함
         self.assertEqual(panel.x_var.get(), "125.00")
         self.assertEqual(panel.y_var.get(), "35.00")
@@ -503,8 +506,9 @@ class TestPropertyPanel(unittest.TestCase):
         pw._on_canvas_release(FakeEvent(x=340, y=350))
 
         self.assertNotEqual(panel.x_var.get(), x_before)
+        page_h_mm = pt.pt_to_mm(panel.page_h_pt)
         self.assertEqual(panel.x_var.get(), f"{pt.pt_to_mm(annot['x']):.2f}")
-        self.assertEqual(panel.y_var.get(), f"{pt.pt_to_mm(annot['y']):.2f}")
+        self.assertEqual(panel.y_var.get(), f"{page_h_mm - pt.pt_to_mm(annot['y']):.2f}")
 
     def test_panel_xy_edit_moves_canvas_text(self):
         pages = self._make_pages()
@@ -797,11 +801,12 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         annot = pages[0]["annots"][0]
         panel = pw.prop_panel
 
+        page_h_mm = pt.pt_to_mm(panel.page_h_pt)
         for x_mm, y_mm in [(50.00, 30.00), (100.00, 100.00)]:
             panel.x_var.set(f"{x_mm:.2f}"); panel.y_var.set(f"{y_mm:.2f}")
             panel._apply_xy()
             self.assertAlmostEqual(pt.pt_to_mm(annot["x"]), x_mm, places=6)
-            self.assertAlmostEqual(pt.pt_to_mm(annot["y"]), y_mm, places=6)
+            self.assertAlmostEqual(page_h_mm - pt.pt_to_mm(annot["y"]), y_mm, places=6)
             expect_px, expect_py = pt.pdf_to_screen(
                 annot["x"], annot["y"], pw._cur_pw, pw._cur_ph, pw._cur_rot,
                 pw._sc, pw._cx, pw._cy)
@@ -907,8 +912,9 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         pw._on_canvas_press(FakeEvent(x=300, y=300))
         pw._on_canvas_motion(FakeEvent(x=250, y=200))
         pw._on_canvas_release(FakeEvent(x=250, y=200))
+        page_h_mm = pt.pt_to_mm(panel.page_h_pt)
         self.assertEqual(panel.x_var.get(), f"{pt.pt_to_mm(annot['x']):.2f}")
-        self.assertEqual(panel.y_var.get(), f"{pt.pt_to_mm(annot['y']):.2f}")
+        self.assertEqual(panel.y_var.get(), f"{page_h_mm - pt.pt_to_mm(annot['y']):.2f}")
 
         # 패널 입력 -> 캔버스 이동
         panel.x_var.set("60.00"); panel.y_var.set("60.00")
@@ -1261,6 +1267,61 @@ class TestUsabilityImprovements(unittest.TestCase):
         with patch.object(pw.canvas, "focus_set") as mock_focus_set:
             pw._on_canvas_press(FakeEvent(x=300, y=300))
         mock_focus_set.assert_called()
+
+    # ── 텍스트가 선택된 상태면 방향키가 (입력창 포커스 여부와 무관하게)
+    #     그 텍스트를 바로 이동시켜야 함 ──────────────────────────
+    def test_arrow_keys_move_selected_text_even_without_entry_focus(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        x_before, y_before = annot["x"], annot["y"]
+
+        with patch.object(pw, "focus_get", return_value=pw.canvas):
+            self.assertFalse(pw._focus_in_entry())
+            pw._on_key_right()
+            pw._nudge_selected_y(0.1)
+
+        self.assertNotEqual(annot["x"], x_before)
+        self.assertNotEqual(annot["y"], y_before)
+
+    def test_left_right_still_navigate_pages_when_nothing_selected(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        pw._select_annot(None)
+        with patch.object(pw, "_go") as mock_go, \
+             patch.object(pw, "focus_get", return_value=pw.canvas):
+            pw._on_key_right()
+        mock_go.assert_called_once_with(1)
+
+    # ── 창 컨트롤(□/✕)이 네이티브 타이틀바처럼 서로 붙어있고,
+    #     닫기 버튼에 마우스를 올리면 빨간색으로 강조되어야 함 ──────
+    def test_window_control_buttons_touch_with_no_gap(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        self.assertIs(pw.fullscreen_btn.master, pw.close_btn.master)
+        self.assertEqual(int(pw.fullscreen_btn.pack_info()["padx"]), 0)
+        self.assertEqual(int(pw.close_btn.pack_info()["padx"]), 0)
+
+    def test_close_button_hover_highlights_red(self):
+        # 합성 <Enter>/<Leave>(포인터 계열) 이벤트는 Xvfb 에 창관리자가 없고
+        # 클래스 공용 root 가 withdraw() 상태면 자식 Toplevel 까지 전달되지
+        # 않는다 (test_mouse_wheel_nudges_xy 와 동일한 테스트 환경 제약이며
+        # 실제 Windows 사용 환경과는 무관하다).
+        self.root.deiconify()
+        self.addCleanup(self.root.withdraw)
+
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        pw.grab_release()
+        pw.update()
+
+        pw.close_btn.event_generate("<Enter>")
+        pw.update()
+        self.assertEqual(pw.close_btn.cget("bg"), "#E81123")
+        self.assertEqual(pw.close_btn.cget("fg"), "white")
+        pw.close_btn.event_generate("<Leave>")
+        pw.update()
+        self.assertEqual(pw.close_btn.cget("bg"), pt.BG)
+        self.assertEqual(pw.close_btn.cget("fg"), pt.TEXT_DIM)
 
     # ── 속성 패널의 삭제 버튼 ─────────────────────────────────
     def test_delete_button_in_property_panel_removes_selected_text(self):
