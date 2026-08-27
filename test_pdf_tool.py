@@ -1987,5 +1987,161 @@ class TestShapeAnnots(unittest.TestCase):
         self.assertIsNone(pw._handle_hit_test(sx, sy))
 
 
+# ══════════════════════════════════════════════════════════
+#  8. 이미지 직접 불러오기(정리 탭) + jpg/png 로 내보내기
+# ══════════════════════════════════════════════════════════
+class TestImageImportAndExport(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pt.TkinterDnD.Tk() if pt.DND_OK else pt.tk.Tk()
+        cls.root.withdraw()
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_img_test_")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _make_image(self, name, size=(900, 600), color=(200, 50, 50)):
+        from PIL import Image as PILImage
+        path = os.path.join(self.tmpdir, name)
+        PILImage.new("RGB", size, color).save(path)
+        return path
+
+    def _export(self, ot, out_path):
+        with patch.object(pt.filedialog, "asksaveasfilename", return_value=out_path), \
+             patch.object(pt.messagebox, "showinfo"), \
+             patch.object(pt.messagebox, "showwarning"), \
+             patch.object(pt.messagebox, "showerror") as mock_err:
+            ot._export()
+        self.assertFalse(mock_err.called, f"내보내기 중 오류: {mock_err.call_args}")
+
+    # ── 이미지를 정리 탭에 직접 불러오기 ────────────────────
+    def test_loading_jpg_creates_a_single_editable_page(self):
+        img = self._make_image("photo.jpg")
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([img])
+        self.assertEqual(len(ot.pages), 1)
+        pg = ot.pages[0]
+        self.assertTrue(pg["src"].lower().endswith(".pdf"),
+            "내부적으로는 임시 PDF로 변환되어 나머지 파이프라인과 동일하게 다뤄져야 함")
+        self.assertEqual(pg["annots"], [])
+
+    def test_loaded_image_page_size_is_reasonable_not_1px_1pt(self):
+        """72dpi(1px=1pt) 그대로 열면 900px 폭 사진이 900pt(약 317mm)가
+        되어버리는데, 150dpi 기준으로 잡으면 훨씬 상식적인 크기가 된다."""
+        img = self._make_image("wide.png", size=(1500, 1000))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([img])
+        pg = ot.pages[0]
+        # 150dpi 기준: 1500px / 150 * 72 = 720pt (약 254mm)
+        self.assertAlmostEqual(pg["page_w_pt"], 720.0, delta=1.0)
+        self.assertAlmostEqual(pg["page_h_pt"], 480.0, delta=1.0)
+
+    def test_image_page_can_have_text_and_shapes_added(self):
+        img = self._make_image("doc.png")
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([img])
+        pages = ot.pages
+        pw = pt.PreviewWin(self.root, pages, 0)
+        self.addCleanup(pw.destroy)
+        pw.update_idletasks(); pw.geometry("1150x820+0+0"); pw.update(); pw._show()
+        self.assertIsNotNone(pw._sc, "이미지에서 변환된 페이지도 정상 렌더링되어야 함")
+        pw._toggle_edit(); pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        self.assertEqual(len(pages[0]["annots"]), 1)
+
+    def test_multiple_images_load_as_independent_pages(self):
+        img1 = self._make_image("a.jpg", color=(200,0,0))
+        img2 = self._make_image("b.jpg", color=(0,200,0))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([img1, img2])
+        self.assertEqual(len(ot.pages), 2)
+        self.assertNotEqual(ot.pages[0]["src"], ot.pages[1]["src"])
+
+    # ── PDF/이미지 혼합 로딩도 정상 동작 ────────────────────
+    def test_pdf_and_image_can_be_mixed_in_same_project(self):
+        pdf_path = os.path.join(self.tmpdir, "doc.pdf")
+        make_pdf(pdf_path, sizes=((595.28, 841.89),))
+        img = self._make_image("photo.jpg")
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([pdf_path, img])
+        self.assertEqual(len(ot.pages), 2)
+
+    # ── jpg/png 로 내보내기 ─────────────────────────────────
+    def test_export_single_image_page_as_png(self):
+        img = self._make_image("single.png")
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([img])
+        out = os.path.join(self.tmpdir, "result.png")
+        self._export(ot, out)
+
+        self.assertTrue(os.path.exists(out))
+        from PIL import Image as PILImage
+        with PILImage.open(out) as saved:
+            self.assertEqual(saved.format, "PNG")
+
+    def test_export_single_page_as_jpg(self):
+        img = self._make_image("single2.png")
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([img])
+        out = os.path.join(self.tmpdir, "result.jpg")
+        self._export(ot, out)
+
+        self.assertTrue(os.path.exists(out))
+        from PIL import Image as PILImage
+        with PILImage.open(out) as saved:
+            self.assertEqual(saved.format, "JPEG")
+
+    def test_export_multipage_as_png_creates_one_file_per_page(self):
+        pdf_path = os.path.join(self.tmpdir, "multi.pdf")
+        make_pdf(pdf_path, sizes=((595.28, 841.89), (595.28, 841.89), (595.28, 841.89)))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([pdf_path])
+        self.assertEqual(len(ot.pages), 3)
+
+        out = os.path.join(self.tmpdir, "multi_out.png")
+        self._export(ot, out)
+
+        expected = [
+            os.path.join(self.tmpdir, "multi_out_p001.png"),
+            os.path.join(self.tmpdir, "multi_out_p002.png"),
+            os.path.join(self.tmpdir, "multi_out_p003.png"),
+        ]
+        for p in expected:
+            self.assertTrue(os.path.exists(p), f"{p} 가 생성되어야 함")
+        # 페이지 수만큼 원래 지정한 파일명 자체는 생성되지 않아야 함(각 페이지 파일로 대체)
+        self.assertFalse(os.path.exists(out))
+
+    def test_exported_image_reflects_added_text(self):
+        """이미지를 불러와 텍스트를 추가한 뒤 jpg로 저장하면, 저장된
+        이미지 안에 그 텍스트가 실제로 그려져 있어야 한다 — 픽셀 검사
+        대신 같은 굽기 결과물을 pdf로도 저장해 텍스트 추출로 확인."""
+        img = self._make_image("withtext.png", size=(800, 600))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([img])
+        pages = ot.pages
+        pages[0]["annots"].append({
+            "id": 7001, "type": "text", "text": "이미지 위 텍스트",
+            "x": pt.mm_to_pt(10), "y": pt.mm_to_pt(10),
+            "font": pt.DEFAULT_ANNOT_FONT, "font_size": 24.0,
+            "color": "#000000", "bold": False, "italic": False,
+            "align": "left", "rotation": 0.0,
+        })
+        doc = ot._build_baked_doc()
+        text = doc[0].get_text()
+        doc.close()
+        self.assertIn("이미지 위 텍스트", text)
+
+
 if __name__ == "__main__":
     unittest.main()

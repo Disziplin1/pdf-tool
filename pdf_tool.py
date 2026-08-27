@@ -3,7 +3,7 @@ PDF 도구  ·  무료 · 오프라인 · 완전 로컬
   ▸ 정리 탭  : 드래그 정렬 · 체크박스 · 호버 툴바 · 미리보기 + 편집
   ▸ 변환 탭  : PDF → 이미지 / 이미지 → PDF
 """
-import sys, os, shutil, subprocess, threading, zipfile, math
+import sys, os, shutil, subprocess, threading, zipfile, math, tempfile
 
 VERSION = "20260827.1713"                       # 배포.bat 이 자동 업데이트
 GITHUB_REPO  = "Disziplin1/pdf-tool"
@@ -1839,6 +1839,7 @@ class OrganizeTab(tk.Frame):
     TW0, TH0 = 148, 172
     PAD      = 16
     BBAR     = 44
+    IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff")
 
     HOV_BTNS = [
         ("🔍", "preview", 0.15),
@@ -1969,7 +1970,7 @@ class OrganizeTab(tk.Frame):
             ch = max(self.canvas.winfo_height(), 300)
             self.canvas.configure(scrollregion=(0,0,cw,ch))  # 빈 상태에서는 스크롤 불가
             self.canvas.create_text(cw//2, ch//2 - 14,
-                text="PDF 파일을 여기에 드래그하세요",
+                text="PDF·이미지 파일을 여기에 드래그하세요",
                 font=(FM, 13, "bold"), fill="#6B6B6B", justify="center")
             self.canvas.create_text(cw//2, ch//2 + 16,
                 text="여러 파일 추가   ·   드래그로 순서 변경   ·   🔍 버튼으로 미리보기",
@@ -2322,18 +2323,56 @@ class OrganizeTab(tk.Frame):
 
     # ── 파일 관리 ────────────────────────────────────────────
     def _add_files(self):
-        ps = filedialog.askopenfilenames(title="PDF 파일 선택",
-                                         filetypes=[("PDF","*.pdf")])
+        ps = filedialog.askopenfilenames(title="PDF/이미지 파일 선택",
+                                         filetypes=[("PDF/이미지", "*.pdf *.jpg *.jpeg *.png *.bmp *.webp *.tiff"),
+                                                    ("PDF", "*.pdf"),
+                                                    ("이미지", "*.jpg *.jpeg *.png *.bmp *.webp *.tiff")])
         self._load_pdfs(list(ps))
 
     def _dnd_drop(self, event):
         self.canvas.config(bg=CARD)
         self._load_pdfs([p for p in parse_paths(event.data)
-                         if p.lower().endswith(".pdf")])
+                         if p.lower().endswith(".pdf") or p.lower().endswith(self.IMG_EXTS)])
+
+    def _image_to_temp_pdf(self, img_path):
+        """이미지 한 장을 임시 PDF 파일로 변환해서 그 경로를 반환한다.
+        이후 파이프라인(정리/편집/내보내기)은 원래 PDF와 완전히 동일하게
+        다룬다. 이미지를 72dpi(1px=1pt) 그대로 열면 페이지 크기가 mm로
+        비상식적으로 커지므로(예: 3000px 폭 사진이 1m 폭 페이지가 됨),
+        적당한 해상도(150dpi) 기준으로 페이지 크기를 다시 잡는다."""
+        if not PREVIEW_OK:
+            messagebox.showerror("오류", "이미지 불러오기에는 pymupdf(fitz)가 필요합니다.")
+            return None
+        try:
+            # fitz.open(image).rect 는 이미지에 DPI 메타데이터가 없으면
+            # 96dpi 로 가정해 이미 pt 로 변환된 값을 주기 때문에(원본 px
+            # 수가 아님), 실제 픽셀 수는 Pixmap 으로 직접 읽는다.
+            src_pix = fitz.Pixmap(img_path)
+            px_w, px_h = src_pix.width, src_pix.height
+            target_dpi = 150.0
+            pt_w, pt_h = px_w/target_dpi*72.0, px_h/target_dpi*72.0
+
+            doc = fitz.open()
+            page = doc.new_page(width=pt_w, height=pt_h)
+            page.insert_image(fitz.Rect(0, 0, pt_w, pt_h), filename=img_path)
+
+            tmp_dir = tempfile.mkdtemp(prefix="pdftool_img_")
+            base = os.path.splitext(os.path.basename(img_path))[0]
+            tmp_path = os.path.join(tmp_dir, f"{base}.pdf")
+            doc.save(tmp_path)
+            doc.close()
+            return tmp_path
+        except Exception as e:
+            messagebox.showerror("오류", f"이미지를 불러오지 못했습니다.\n{os.path.basename(img_path)}\n{e}")
+            return None
 
     def _load_pdfs(self, paths):
         for path in paths:
             try:
+                if path.lower().endswith(self.IMG_EXTS):
+                    converted = self._image_to_temp_pdf(path)
+                    if converted is None: continue
+                    path = converted
                 r = PdfReader(path)
                 # 페이지 pt 크기는 회전 편집(rot)과 무관한 "원본" 크기여야
                 # 하므로, 미리보기 렌더링과 동일한 출처(fitz page.rect)에서
@@ -2380,16 +2419,29 @@ class OrganizeTab(tk.Frame):
         if not self.pages:
             messagebox.showwarning("경고","페이지가 없습니다."); return
         init_dir = os.path.dirname(self.pages[0]["src"]) if self.pages else ""
-        out = filedialog.asksaveasfilename(title="PDF로 저장",
-            defaultextension=".pdf", filetypes=[("PDF","*.pdf")],
+        out = filedialog.asksaveasfilename(title="저장",
+            defaultextension=".pdf",
+            filetypes=[("PDF","*.pdf"), ("JPG 이미지","*.jpg"), ("PNG 이미지","*.png")],
             initialdir=init_dir, initialfile="output.pdf")
         if not out: return
+        ext = os.path.splitext(out)[1].lower()
         try:
-            if PREVIEW_OK:
+            if ext in (".jpg", ".jpeg", ".png"):
+                if not PREVIEW_OK:
+                    messagebox.showerror("오류", "이미지로 저장하려면 pymupdf(fitz)가 필요합니다.")
+                    return
+                saved = self._export_as_images(out, ext)
+                if len(saved) == 1:
+                    messagebox.showinfo("완료", f"저장 완료!\n{saved[0]}")
+                else:
+                    messagebox.showinfo("완료",
+                        f"페이지마다 별도 파일로 {len(saved)}개 저장 완료!\n{os.path.dirname(saved[0])}")
+            elif PREVIEW_OK:
                 self._export_with_fitz(out)
+                messagebox.showinfo("완료", f"저장 완료!\n{out}")
             else:
                 self._export_with_pypdf(out)
-            messagebox.showinfo("완료",f"저장 완료!\n{out}")
+                messagebox.showinfo("완료", f"저장 완료!\n{out}")
         except Exception as e:
             messagebox.showerror("오류",str(e))
 
@@ -2408,11 +2460,13 @@ class OrganizeTab(tk.Frame):
             if rot: added.rotate(rot)
         with open(out,"wb") as f: w.write(f)
 
-    def _export_with_fitz(self, out):
-        """페이지를 복사하고 우리 앱에서 추가한 회전(pg["rot"])을 적용한
-        뒤, 텍스트 annot 을 실제 PDF 콘텐츠로 굽는다. 소스 문서를 직접
-        수정하지 않고(페이지 복제 시 같은 원본을 공유할 수 있으므로)
-        out_doc 에 복사해 넣은 뒤 그 복사본에만 텍스트를 그린다."""
+    def _build_baked_doc(self):
+        """모든 페이지를 복사하고, 우리 앱에서 추가한 회전(pg["rot"])과
+        텍스트/도형 annot 을 실제 콘텐츠로 구운 fitz.Document 를 새로
+        만들어 반환한다(호출자가 닫아야 함). 소스 문서를 직접 수정하지
+        않고(페이지 복제 시 같은 원본을 공유할 수 있으므로) out_doc 에
+        복사해 넣은 뒤 그 복사본에만 그린다. PDF 저장과 이미지 저장이
+        이 결과물을 공유해서 둘의 결과가 어긋나지 않게 한다."""
         out_doc    = fitz.open()
         src_cache  = {}
         font_cache = {}
@@ -2431,10 +2485,42 @@ class OrganizeTab(tk.Frame):
                     out_page.set_rotation((native_rot + extra_rot) % 360)
 
                 _bake_all_annots(out_page, pg, native_rot, font_cache)
+            return out_doc
+        finally:
+            for d in src_cache.values(): d.close()
+
+    def _export_with_fitz(self, out):
+        out_doc = self._build_baked_doc()
+        try:
             out_doc.save(out)
         finally:
             out_doc.close()
-            for d in src_cache.values(): d.close()
+
+    def _export_as_images(self, out, ext):
+        """확장자가 jpg/png 일 때: 페이지가 1장이면 고른 경로에 그대로,
+        여러 장이면 같은 폴더에 '_p1','_p2'... 를 붙여 각각 저장한다
+        (PDF 한 장이 이미지 한 장이 되는 형식적 제약 때문)."""
+        fmt = "JPEG" if ext in (".jpg", ".jpeg") else "PNG"
+        out_doc = self._build_baked_doc()
+        try:
+            base_dir  = os.path.dirname(out)
+            base_name = os.path.splitext(os.path.basename(out))[0]
+            dpi = 300
+            sc  = dpi / 72
+            n   = len(out_doc)
+            saved = []
+            for i, page in enumerate(out_doc):
+                pix = page.get_pixmap(matrix=fitz.Matrix(sc, sc), alpha=False)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                path = out if n == 1 else os.path.join(base_dir, f"{base_name}_p{i+1:03d}{ext}")
+                if fmt == "JPEG":
+                    img.save(path, "JPEG", quality=92)
+                else:
+                    img.save(path, "PNG")
+                saved.append(path)
+            return saved
+        finally:
+            out_doc.close()
 
 
 # ══════════════════════════════════════════════════════════
