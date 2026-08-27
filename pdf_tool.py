@@ -133,7 +133,6 @@ DROPH    = "#FDEDEC"   # 드래그오버 (Light Background)
 INSLINE  = "#C0392B"
 SH1      = "#D9D6D4"   # 그림자 (진)
 SH2      = "#EAE8E6"   # 그림자 (연)
-PREV_BG  = "#140830"   # 미리보기 배경 (별도 다크 테마 유지)
 
 FM     = "맑은 고딕"
 FONT   = (FM, 10)
@@ -147,7 +146,8 @@ FONT_XS= (FM, 8)
 # 있으므로, 항상 .get(key, DEFAULT_*) 형태로 읽어 하위 호환을 유지한다)
 DEFAULT_ANNOT_FONT  = FM
 DEFAULT_ANNOT_SIZE  = 14.0     # pt
-DEFAULT_ANNOT_COLOR = ACCENT
+DEFAULT_ANNOT_COLOR = "#000000"
+DEFAULT_ANNOT_TEXT  = "텍스트"  # 새 텍스트 생성 시 기본 내용(바로 선택되어 덮어쓰기 가능)
 
 
 # ══════════════════════════════════════════════════════════
@@ -305,7 +305,7 @@ class TextPropPanel(tk.Frame):
     ALIGN_CHOICES = [("좌측", "left"), ("가운데", "center"), ("우측", "right")]
 
     def __init__(self, master, owner):
-        super().__init__(master, bg="#1e0c44", width=230)
+        super().__init__(master, bg=PANEL, width=230)
         self.owner = owner          # PreviewWin 인스턴스 (변경 통지용)
         self.annot = None
         self.pack_propagate(False)  # 내용과 무관하게 폭 고정
@@ -313,45 +313,57 @@ class TextPropPanel(tk.Frame):
 
     def _build(self):
         pad = dict(padx=14)
-        tk.Label(self, text="텍스트 속성", font=FONT_B, bg="#1e0c44", fg="#e0d0ff")\
+        tk.Label(self, text="텍스트 속성", font=FONT_B, bg=PANEL, fg=TEXT)\
             .pack(anchor="w", padx=14, pady=(12,4))
-        tk.Frame(self, bg="#3a2a5a", height=1).pack(fill="x", padx=14, pady=(0,8))
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=14, pady=(0,8))
 
         # ── 내용 ──────────────────────────────────────────
-        tk.Label(self, text="내용", font=FONT_S, bg="#1e0c44", fg="#c8a8ff").pack(anchor="w", **pad)
+        tk.Label(self, text="내용", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(anchor="w", **pad)
         self.text_var = tk.StringVar()
-        e_text = tk.Entry(self, textvariable=self.text_var, font=FONT, bg="white", fg="#222")
-        e_text.pack(fill="x", padx=14, pady=(2,8))
-        e_text.bind("<Return>", lambda e: self._apply_text())
-        e_text.bind("<FocusOut>", lambda e: self._apply_text())
+        self.content_entry = tk.Entry(self, textvariable=self.text_var, font=FONT, bg="white", fg=TEXT)
+        self.content_entry.pack(fill="x", padx=14, pady=(2,8))
+        self.content_entry.bind("<Return>", lambda e: self._apply_text())
+        self.content_entry.bind("<FocusOut>", lambda e: self._apply_text())
 
         # ── 위치 (X/Y, mm) ───────────────────────────────
         tk.Label(self, text="위치 (기준: 페이지 좌측 상단)", font=FONT_S,
-                 bg="#1e0c44", fg="#c8a8ff").pack(anchor="w", padx=14, pady=(4,2))
+                 bg=PANEL, fg=TEXT_DIM).pack(anchor="w", padx=14, pady=(4,2))
+        tk.Label(self, text="↑↓ 또는 휠로 미세조정 (Shift=1mm)", font=FONT_XS,
+                 bg=PANEL, fg=TEXT_DIM).pack(anchor="w", padx=14)
 
-        xrow = tk.Frame(self, bg="#1e0c44"); xrow.pack(fill="x", padx=14)
-        tk.Label(xrow, text="X", font=FONT_S, bg="#1e0c44", fg="#e0d0ff", width=2).pack(side="left")
+        xrow = tk.Frame(self, bg=PANEL); xrow.pack(fill="x", padx=14, pady=(2,0))
+        tk.Label(xrow, text="X", font=FONT_S, bg=PANEL, fg=TEXT, width=2).pack(side="left")
         self.x_var = tk.StringVar()
-        e_x = tk.Entry(xrow, textvariable=self.x_var, font=FONT, width=9, bg="white", fg="#222")
+        e_x = tk.Entry(xrow, textvariable=self.x_var, font=FONT, width=9, bg="white", fg=TEXT)
         e_x.pack(side="left")
-        tk.Label(xrow, text="mm", font=FONT_XS, bg="#1e0c44", fg="#9a8ab8").pack(side="left", padx=(4,0))
+        tk.Label(xrow, text="mm", font=FONT_XS, bg=PANEL, fg=TEXT_DIM).pack(side="left", padx=(4,0))
         e_x.bind("<Return>", lambda e: self._apply_xy())
         e_x.bind("<FocusOut>", lambda e: self._apply_xy())
+        e_x.bind("<Up>",          lambda e: self._nudge_x(0.1))
+        e_x.bind("<Down>",        lambda e: self._nudge_x(-0.1))
+        e_x.bind("<Shift-Up>",    lambda e: self._nudge_x(1.0))
+        e_x.bind("<Shift-Down>",  lambda e: self._nudge_x(-1.0))
+        e_x.bind("<MouseWheel>",  lambda e: self._nudge_x(0.1 if e.delta > 0 else -0.1))
 
-        yrow = tk.Frame(self, bg="#1e0c44"); yrow.pack(fill="x", padx=14, pady=(4,4))
-        tk.Label(yrow, text="Y", font=FONT_S, bg="#1e0c44", fg="#e0d0ff", width=2).pack(side="left")
+        yrow = tk.Frame(self, bg=PANEL); yrow.pack(fill="x", padx=14, pady=(4,4))
+        tk.Label(yrow, text="Y", font=FONT_S, bg=PANEL, fg=TEXT, width=2).pack(side="left")
         self.y_var = tk.StringVar()
-        e_y = tk.Entry(yrow, textvariable=self.y_var, font=FONT, width=9, bg="white", fg="#222")
+        e_y = tk.Entry(yrow, textvariable=self.y_var, font=FONT, width=9, bg="white", fg=TEXT)
         e_y.pack(side="left")
-        tk.Label(yrow, text="mm", font=FONT_XS, bg="#1e0c44", fg="#9a8ab8").pack(side="left", padx=(4,0))
+        tk.Label(yrow, text="mm", font=FONT_XS, bg=PANEL, fg=TEXT_DIM).pack(side="left", padx=(4,0))
         e_y.bind("<Return>", lambda e: self._apply_xy())
         e_y.bind("<FocusOut>", lambda e: self._apply_xy())
+        e_y.bind("<Up>",          lambda e: self._nudge_y(0.1))
+        e_y.bind("<Down>",        lambda e: self._nudge_y(-0.1))
+        e_y.bind("<Shift-Up>",    lambda e: self._nudge_y(1.0))
+        e_y.bind("<Shift-Down>",  lambda e: self._nudge_y(-1.0))
+        e_y.bind("<MouseWheel>",  lambda e: self._nudge_y(0.1 if e.delta > 0 else -0.1))
 
-        self.page_size_lbl = tk.Label(self, text="", font=FONT_XS, bg="#1e0c44", fg="#7a6a98")
+        self.page_size_lbl = tk.Label(self, text="", font=FONT_XS, bg=PANEL, fg=TEXT_DIM)
         self.page_size_lbl.pack(anchor="w", padx=14, pady=(2,8))
 
         # ── 글꼴 ──────────────────────────────────────────
-        tk.Label(self, text="글꼴", font=FONT_S, bg="#1e0c44", fg="#c8a8ff").pack(anchor="w", **pad)
+        tk.Label(self, text="글꼴", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(anchor="w", **pad)
         self.font_var = tk.StringVar()
         self.font_combo = ttk.Combobox(self, textvariable=self.font_var, values=self._font_list(),
                                         state="readonly", font=FONT_S)
@@ -359,35 +371,35 @@ class TextPropPanel(tk.Frame):
         self.font_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_font())
 
         # ── 크기 ──────────────────────────────────────────
-        tk.Label(self, text="크기 (pt)", font=FONT_S, bg="#1e0c44", fg="#c8a8ff").pack(anchor="w", **pad)
+        tk.Label(self, text="크기 (pt)", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(anchor="w", **pad)
         self.size_var = tk.StringVar()
-        e_size = tk.Entry(self, textvariable=self.size_var, font=FONT, width=9, bg="white", fg="#222")
+        e_size = tk.Entry(self, textvariable=self.size_var, font=FONT, width=9, bg="white", fg=TEXT)
         e_size.pack(anchor="w", padx=14, pady=(2,8))
         e_size.bind("<Return>", lambda e: self._apply_size())
         e_size.bind("<FocusOut>", lambda e: self._apply_size())
 
         # ── 색상 ──────────────────────────────────────────
-        crow = tk.Frame(self, bg="#1e0c44"); crow.pack(fill="x", padx=14, pady=(0,8))
-        tk.Label(crow, text="색상", font=FONT_S, bg="#1e0c44", fg="#c8a8ff").pack(side="left")
+        crow = tk.Frame(self, bg=PANEL); crow.pack(fill="x", padx=14, pady=(0,8))
+        tk.Label(crow, text="색상", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(side="left")
         self.color_btn = tk.Button(crow, text="   ", bg=DEFAULT_ANNOT_COLOR, width=4,
                                     relief="flat", bd=1, cursor="hand2", command=self._pick_color)
         self.color_btn.pack(side="left", padx=8)
 
         # ── 굵게 / 기울임 ─────────────────────────────────
-        birow = tk.Frame(self, bg="#1e0c44"); birow.pack(fill="x", padx=10, pady=(0,8))
+        birow = tk.Frame(self, bg=PANEL); birow.pack(fill="x", padx=10, pady=(0,8))
         self.bold_var = tk.BooleanVar()
         self.italic_var = tk.BooleanVar()
         tk.Checkbutton(birow, text="굵게", variable=self.bold_var, command=self._apply_style,
-                       bg="#1e0c44", fg="#e0d0ff", selectcolor="#2e1a55",
-                       activebackground="#1e0c44", font=FONT_S, bd=0,
+                       bg=PANEL, fg=TEXT, selectcolor=ACCENT,
+                       activebackground=PANEL, font=FONT_S, bd=0,
                        highlightthickness=0).pack(side="left", padx=4)
         tk.Checkbutton(birow, text="기울임", variable=self.italic_var, command=self._apply_style,
-                       bg="#1e0c44", fg="#e0d0ff", selectcolor="#2e1a55",
-                       activebackground="#1e0c44", font=FONT_S, bd=0,
+                       bg=PANEL, fg=TEXT, selectcolor=ACCENT,
+                       activebackground=PANEL, font=FONT_S, bd=0,
                        highlightthickness=0).pack(side="left", padx=4)
 
         # ── 정렬 ──────────────────────────────────────────
-        tk.Label(self, text="정렬", font=FONT_S, bg="#1e0c44", fg="#c8a8ff").pack(anchor="w", **pad)
+        tk.Label(self, text="정렬", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(anchor="w", **pad)
         self.align_var = tk.StringVar()
         self.align_combo = ttk.Combobox(
             self, textvariable=self.align_var,
@@ -397,9 +409,9 @@ class TextPropPanel(tk.Frame):
         self.align_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_align())
 
         # ── 회전 (텍스트 자체 회전 — 페이지 회전과 별개) ──
-        tk.Label(self, text="회전 (°)", font=FONT_S, bg="#1e0c44", fg="#c8a8ff").pack(anchor="w", **pad)
+        tk.Label(self, text="회전 (°)", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(anchor="w", **pad)
         self.rot_var = tk.StringVar()
-        e_rot = tk.Entry(self, textvariable=self.rot_var, font=FONT, width=9, bg="white", fg="#222")
+        e_rot = tk.Entry(self, textvariable=self.rot_var, font=FONT, width=9, bg="white", fg=TEXT)
         e_rot.pack(anchor="w", padx=14, pady=(2,8))
         e_rot.bind("<Return>", lambda e: self._apply_rotation())
         e_rot.bind("<FocusOut>", lambda e: self._apply_rotation())
@@ -444,6 +456,29 @@ class TextPropPanel(tk.Frame):
         if self.annot is None: return
         self.x_var.set(f"{pt_to_mm(self.annot['x']):.2f}")
         self.y_var.set(f"{pt_to_mm(self.annot['y']):.2f}")
+
+    def focus_content_for_edit(self):
+        """새 텍스트 생성 직후 '내용' 입력창에 포커스를 옮기고 전체 선택해서
+        곧바로 타이핑으로 덮어쓸 수 있게 한다 (팝업 대화상자 없이 생성)."""
+        self.content_entry.focus_set()
+        self.content_entry.selection_range(0, tk.END)
+
+    # ── X/Y 미세조정 (방향키 · 마우스 휠) ─────────────────────
+    def _nudge_x(self, delta_mm):
+        if self.annot is None: return "break"
+        try: v = float(self.x_var.get())
+        except ValueError: return "break"
+        self.x_var.set(f"{v + delta_mm:.2f}")
+        self._apply_xy()
+        return "break"
+
+    def _nudge_y(self, delta_mm):
+        if self.annot is None: return "break"
+        try: v = float(self.y_var.get())
+        except ValueError: return "break"
+        self.y_var.set(f"{v + delta_mm:.2f}")
+        self._apply_xy()
+        return "break"
 
     # ── 각 필드 적용 (Enter / 포커스 아웃 시점에 반영) ───────
     def _apply_text(self):
@@ -555,7 +590,7 @@ class PreviewWin(tk.Toplevel):
         w, h   = min(940, sw-60), min(820, sh-60)
         self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
         self.title("미리보기")
-        self.configure(bg=PREV_BG)
+        self.configure(bg=BG)
         self.transient(parent)
         self.grab_set()
         self.focus_set()
@@ -569,7 +604,8 @@ class PreviewWin(tk.Toplevel):
         # "-" 가 축소 단축키로 먼저 소비되는 문제 방지).
         self.bind("<Left>",       lambda e: None if self._focus_in_entry() else self._go(-1))
         self.bind("<Right>",      lambda e: None if self._focus_in_entry() else self._go(1))
-        self.bind("<Escape>",     lambda e: self.destroy())
+        # Esc 로 창이 닫히지 않게 한다 — 텍스트 입력 중 실수로 창 전체가
+        # 닫히는 문제가 있어, 미리보기 창은 우측 상단 ✕ 버튼으로만 닫는다.
         self.bind("<plus>",       lambda e: None if self._focus_in_entry() else self._zoom(1.25))
         self.bind("<equal>",      lambda e: None if self._focus_in_entry() else self._zoom(1.25))
         self.bind("<minus>",      lambda e: None if self._focus_in_entry() else self._zoom(1/1.25))
@@ -578,43 +614,43 @@ class PreviewWin(tk.Toplevel):
 
     def _build(self):
         # ── 상단 타이틀 바 ───────────────────────────────
-        top = tk.Frame(self, bg=PREV_BG)
+        top = tk.Frame(self, bg=BG)
         top.pack(fill="x", padx=20, pady=(14, 0))
         self.title_lbl = tk.Label(top, text="", font=FONT_B,
-                                  bg=PREV_BG, fg="#c8b0f0")
+                                  bg=BG, fg=TEXT)
         self.title_lbl.pack(side="left")
         tk.Button(top, text="✕", command=self.destroy,
-                  bg=PREV_BG, fg="#665588", font=(FM, 14),
+                  bg=BG, fg=TEXT_DIM, font=(FM, 14),
                   relief="flat", bd=0, cursor="hand2",
-                  activebackground=PREV_BG).pack(side="right")
+                  activebackground=BG).pack(side="right")
         self.edit_btn = tk.Button(top, text="✎ 편집 모드", command=self._toggle_edit,
-                  bg="#2e1a55", fg="#c8a8ff", font=FONT_B,
+                  bg=TOOLBAR, fg=TEXT_DIM, font=FONT_B,
                   relief="flat", padx=12, pady=5, cursor="hand2",
-                  bd=0, activebackground="#3e2a70")
+                  bd=0, activebackground=_shade(TOOLBAR, 0.92))
         self.edit_btn.pack(side="right", padx=(0,10))
 
         # ── 편집 툴바 (편집 모드일 때만 표시) ────────────
-        self.edit_toolbar = tk.Frame(self, bg="#1e0c44")
+        self.edit_toolbar = tk.Frame(self, bg=TOOLBAR)
         self.tool_btns = {}
         for key, label in [("select","🖱 선택"), ("text","T 텍스트")]:
             b = tk.Button(self.edit_toolbar, text=label,
                           command=lambda k=key: self._set_tool(k),
-                          bg="#2e1a55", fg="#c8a8ff", font=FONT_B,
+                          bg=TOOLBAR, fg=TEXT_DIM, font=FONT_B,
                           relief="flat", padx=14, pady=6, cursor="hand2",
-                          bd=0, activebackground="#3e2a70")
+                          bd=0, activebackground=_shade(TOOLBAR, 0.92))
             b.pack(side="left", padx=(20 if key=="select" else 4, 4), pady=6)
             self.tool_btns[key] = b
 
         # ── 이미지 캔버스 + 우측 속성 패널 ──────────────────
-        mid = tk.Frame(self, bg=PREV_BG)
+        mid = tk.Frame(self, bg=BG)
         self.preview_cf = mid
         mid.pack(fill="both", expand=True)
         # 속성 패널은 텍스트를 선택했을 때만 pack() 되어 나타난다 (17번 요구사항)
         self.prop_panel = TextPropPanel(mid, owner=self)
 
-        cf = tk.Frame(mid, bg=PREV_BG)
+        cf = tk.Frame(mid, bg=BG)
         cf.pack(side="left", fill="both", expand=True, padx=30, pady=12)
-        self.canvas = tk.Canvas(cf, bg=PREV_BG, bd=0, highlightthickness=0)
+        self.canvas = tk.Canvas(cf, bg=BG, bd=0, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>",      self._on_resize)
         self.canvas.bind("<MouseWheel>",
@@ -624,57 +660,58 @@ class PreviewWin(tk.Toplevel):
         self.canvas.bind("<ButtonRelease-1>",self._on_canvas_release)
 
         # ── 하단 컨트롤 바 (네비 + 편집) ────────────────
-        nav = tk.Frame(self, bg="#1e0c44", pady=10)
+        nav = tk.Frame(self, bg=TOOLBAR, pady=10)
         nav.pack(fill="x")
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", side="bottom")
 
         # 이전 / 다음
         self.btn_prev = tk.Button(nav, text="◀", command=lambda: self._go(-1),
-                                  bg="#2e1a55", fg="#c8a8ff", font=FONT_B,
+                                  bg=TOOLBAR, fg=TEXT_DIM, font=FONT_B,
                                   relief="flat", padx=14, pady=8, cursor="hand2",
-                                  bd=0, activebackground="#3e2a70")
+                                  bd=0, activebackground=_shade(TOOLBAR, 0.92))
         self.btn_prev.pack(side="left", padx=(20, 4))
 
         self.page_lbl = tk.Label(nav, text="", font=FONT_B,
-                                 bg="#1e0c44", fg="#e0d0ff")
+                                 bg=TOOLBAR, fg=TEXT)
         self.page_lbl.pack(side="left", padx=8)
 
         self.btn_next = tk.Button(nav, text="▶", command=lambda: self._go(1),
-                                  bg="#2e1a55", fg="#c8a8ff", font=FONT_B,
+                                  bg=TOOLBAR, fg=TEXT_DIM, font=FONT_B,
                                   relief="flat", padx=14, pady=8, cursor="hand2",
-                                  bd=0, activebackground="#3e2a70")
+                                  bd=0, activebackground=_shade(TOOLBAR, 0.92))
         self.btn_next.pack(side="left", padx=(4, 20))
 
         # ── 편집 버튼들 (가운데) ─────────────────────────
-        edit = tk.Frame(nav, bg="#1e0c44")
+        edit = tk.Frame(nav, bg=TOOLBAR)
         edit.pack(side="left", expand=True)
 
-        for txt, cmd, bg in [
-            ("↺ 왼쪽 90°", lambda: self._rotate(-90), "#2e1a55"),
-            ("↻ 오른쪽 90°", lambda: self._rotate(90),  "#2e1a55"),
-            ("🗑 이 페이지 삭제", self._delete,         DANGER),
+        for txt, cmd, bg, fg in [
+            ("↺ 왼쪽 90°", lambda: self._rotate(-90), TOOLBAR, TEXT),
+            ("↻ 오른쪽 90°", lambda: self._rotate(90),  TOOLBAR, TEXT),
+            ("🗑 이 페이지 삭제", self._delete,         DANGER, "white"),
         ]:
             b = tk.Button(edit, text=txt, command=cmd, bg=bg,
-                          fg="white", font=FONT, relief="flat",
+                          fg=fg, font=FONT, relief="flat",
                           padx=12, pady=7, cursor="hand2", bd=0)
             b.pack(side="left", padx=5)
 
         # ── 줌 버튼들 ────────────────────────────────────
-        zoom_fr = tk.Frame(nav, bg="#1e0c44")
+        zoom_fr = tk.Frame(nav, bg=TOOLBAR)
         zoom_fr.pack(side="right", padx=(0, 12))
 
         tk.Button(zoom_fr, text="−", command=lambda: self._zoom(1/1.25),
-                  bg="#2e1a55", fg="#c8a8ff", font=(FM, 13, "bold"),
+                  bg=TOOLBAR, fg=TEXT_DIM, font=(FM, 13, "bold"),
                   relief="flat", padx=10, pady=6, cursor="hand2",
-                  bd=0, activebackground="#3e2a70").pack(side="left", padx=2)
+                  bd=0, activebackground=_shade(TOOLBAR, 0.92)).pack(side="left", padx=2)
 
         self.zoom_lbl = tk.Label(zoom_fr, text="100%", width=5,
-                                 font=FONT, bg="#1e0c44", fg="#e0d0ff")
+                                 font=FONT, bg=TOOLBAR, fg=TEXT)
         self.zoom_lbl.pack(side="left")
 
         tk.Button(zoom_fr, text="+", command=lambda: self._zoom(1.25),
-                  bg="#2e1a55", fg="#c8a8ff", font=(FM, 13, "bold"),
+                  bg=TOOLBAR, fg=TEXT_DIM, font=(FM, 13, "bold"),
                   relief="flat", padx=10, pady=6, cursor="hand2",
-                  bd=0, activebackground="#3e2a70").pack(side="left", padx=2)
+                  bd=0, activebackground=_shade(TOOLBAR, 0.92)).pack(side="left", padx=2)
 
         # 닫기
         tk.Button(nav, text="닫기", command=self.destroy,
@@ -729,14 +766,14 @@ class PreviewWin(tk.Toplevel):
             ix = cw//2 + self.pan_x
             iy = ch//2 + self.pan_y
             # 부드러운 그림자
-            for d, col in [(8,"#0a0520"),(5,"#140830"),(2,"#1e0c44")]:
+            for d, col in [(8,SH1),(5,SH2),(2,"#F2F2F2")]:
                 self.canvas.create_rectangle(
                     ix-iw//2+d, iy-ih//2+d, ix+iw//2+d, iy+ih//2+d,
                     fill=col, outline="")
             # 흰 테두리 + 이미지
             self.canvas.create_rectangle(
                 ix-iw//2-3, iy-ih//2-3, ix+iw//2+3, iy+ih//2+3,
-                fill="white", outline="#443366", width=1)
+                fill="white", outline=BORDER, width=1)
             self.canvas.create_image(ix, iy, image=self.photo)
 
             # 좌표 변환 상태 저장 (클릭/드래그에서 screen_to_pdf 에 사용)
@@ -828,8 +865,8 @@ class PreviewWin(tk.Toplevel):
     # ── 편집 모드 / 도구 선택 ─────────────────────────────────
     def _toggle_edit(self):
         self.edit_mode = not self.edit_mode
-        self.edit_btn.config(bg=ACCENT if self.edit_mode else "#2e1a55",
-                              fg="white" if self.edit_mode else "#c8a8ff")
+        self.edit_btn.config(bg=ACCENT if self.edit_mode else TOOLBAR,
+                              fg="white" if self.edit_mode else TEXT_DIM)
         if self.edit_mode:
             self.edit_toolbar.pack(fill="x", before=self.preview_cf)
             self._set_tool(self.tool)
@@ -842,8 +879,8 @@ class PreviewWin(tk.Toplevel):
         self.tool = key
         for k, b in self.tool_btns.items():
             active = (k == key)
-            b.config(bg=ACCENT if active else "#2e1a55",
-                     fg="white" if active else "#c8a8ff")
+            b.config(bg=ACCENT if active else TOOLBAR,
+                     fg="white" if active else TEXT_DIM)
         self.canvas.config(cursor="xterm" if key == "text" else "")
 
     def _focus_in_entry(self):
@@ -873,6 +910,16 @@ class PreviewWin(tk.Toplevel):
                 return a
         return None
 
+    def _redraw_annots(self):
+        """페이지 배경(비트맵)은 그대로 두고 annot 오버레이만 다시 그린다.
+        선택/이동/속성변경처럼 배경이 바뀌지 않는 갱신에서 매번 PDF를
+        다시 렌더링(_show)하면 드래그 중 깜빡임·끊김이 생기므로, 이 경량
+        경로를 대신 쓴다. 줌/팬/페이지이동/회전처럼 배경 자체가 바뀔 때만
+        _show() 의 전체 재렌더링이 필요하다."""
+        if self._sc is None: return
+        self.canvas.delete("annot")
+        self._draw_annots(self._cur_page())
+
     def _select_annot(self, aid):
         self.selected_id = aid
         annot = self._find_annot(aid) if aid is not None else None
@@ -882,27 +929,23 @@ class PreviewWin(tk.Toplevel):
             pg = self._cur_page()
             self.prop_panel.show_annot(annot, pg.get("page_w_pt"), pg.get("page_h_pt"))
             self.prop_panel.pack(side="right", fill="y")
-        self._show()
+        self._redraw_annots()
 
     def _on_annot_prop_changed(self):
-        """속성 패널에서 값이 바뀌었을 때 캔버스에 즉시 반영."""
-        self._show()
+        """속성 패널에서 값이 바뀌었을 때 캔버스에 즉시 반영 (배경 재렌더링 없이)."""
+        self._redraw_annots()
         if self.on_change: self.on_change()
 
-    def _ask_text(self):
-        """텍스트 입력 대화상자. 테스트에서는 이 메서드를 mock 처리한다."""
-        from tkinter import simpledialog
-        return simpledialog.askstring("텍스트 입력", "내용을 입력하세요:", parent=self)
-
     def _create_text_at(self, ex, ey):
+        """클릭 즉시 기본 텍스트로 객체를 만들고 선택한 뒤, 속성 패널의
+        '내용' 입력창에 포커스를 옮겨 바로 타이핑해서 바꿀 수 있게 한다
+        (팝업 대화상자를 거치지 않아 생성 흐름이 한 단계 줄어든다)."""
         if self._sc is None: return
-        text = self._ask_text()
-        if not text: return
         x_pt, y_pt = screen_to_pdf(ex, ey, self._cur_pw, self._cur_ph,
                                     self._cur_rot, self._sc, self._cx, self._cy)
         pg = self.pages[self.idx]
         annot = {
-            "id": next(_id_gen), "type": "text", "text": text,
+            "id": next(_id_gen), "type": "text", "text": DEFAULT_ANNOT_TEXT,
             "x": x_pt, "y": y_pt,
             "font": DEFAULT_ANNOT_FONT, "font_size": DEFAULT_ANNOT_SIZE,
             "color": DEFAULT_ANNOT_COLOR, "bold": False, "italic": False,
@@ -910,6 +953,7 @@ class PreviewWin(tk.Toplevel):
         }
         pg.setdefault("annots", []).append(annot)
         self._select_annot(annot["id"])
+        self.prop_panel.focus_content_for_edit()
         if self.on_change: self.on_change()
 
     def _drag_annot(self, e):
@@ -921,7 +965,7 @@ class PreviewWin(tk.Toplevel):
         a["x"] = px_pdf + self._move_state["off_x"]
         a["y"] = py_pdf + self._move_state["off_y"]
         self.prop_panel.refresh_xy_only()
-        self._show()
+        self._redraw_annots()
 
     def _delete_selected_annot(self, e=None):
         if self.selected_id is None: return
@@ -929,7 +973,7 @@ class PreviewWin(tk.Toplevel):
         pg["annots"] = [a for a in pg.get("annots", []) if a["id"] != self.selected_id]
         self.selected_id = None
         self.prop_panel.pack_forget()
-        self._show()
+        self._redraw_annots()
         if self.on_change: self.on_change()
 
     def _draw_annots(self, pg):

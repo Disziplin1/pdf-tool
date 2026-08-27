@@ -7,8 +7,9 @@ pdf_tool.py 자동 테스트 (unittest, 표준 라이브러리만 사용)
 테스트 대상:
   - 좌표 변환 함수 (mm/pt, 회전, 화면<->PDF) 는 순수 함수 테스트
   - OrganizeTab/PreviewWin 은 실제 Tk 위젯을 만들어 동작을 검증
-  - 모달 입력창(simpledialog)은 실제로 띄우지 않고 PreviewWin._ask_text 를
-    mock 처리해서 테스트를 자동으로 진행한다 (지시사항 22번 참고)
+  - 텍스트 생성은 팝업 대화상자 없이 클릭 즉시 기본 텍스트(DEFAULT_ANNOT_TEXT)로
+    만들어지므로, 커스텀 내용이 필요한 테스트는 생성 후 annot["text"] 를 직접
+    바꾸거나 prop_panel.text_var/_apply_text() 로 편집한다
 """
 import math
 import os
@@ -243,14 +244,13 @@ class TestPreviewWinText(unittest.TestCase):
         pw._set_tool("text")
 
         click_x, click_y = 300, 300
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="안녕하세요"):
-            pw._on_canvas_press(FakeEvent(x=click_x, y=click_y))
+        pw._on_canvas_press(FakeEvent(x=click_x, y=click_y))
 
         annots = pages[0]["annots"]
         self.assertEqual(len(annots), 1)
         a = annots[0]
         self.assertEqual(a["type"], "text")
-        self.assertEqual(a["text"], "안녕하세요")
+        self.assertEqual(a["text"], pt.DEFAULT_ANNOT_TEXT)
 
         # 저장된 좌표가 PDF pt 공간이며, 클릭 지점을 screen_to_pdf 로 변환한 값과 일치해야 함
         expect_x, expect_y = pt.screen_to_pdf(
@@ -262,27 +262,28 @@ class TestPreviewWinText(unittest.TestCase):
         pages = self._make_pages()
         pw = self._open_preview(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="hi"):
-            pw._on_canvas_press(FakeEvent(x=250, y=250))
+        pw._on_canvas_press(FakeEvent(x=250, y=250))
         aid = pages[0]["annots"][0]["id"]
         items = pw.canvas.find_withtag(f"annot_{aid}")
         self.assertTrue(len(items) >= 1)
 
-    def test_empty_text_input_cancelled(self):
-        """입력창에서 취소(None)하면 annot 이 생성되지 않아야 한다."""
+    def test_click_creates_placeholder_text_without_modal_and_focuses_content(self):
+        """팝업 대화상자 없이 클릭 즉시 기본 텍스트로 생성되고, 바로 타이핑해서
+        바꿀 수 있도록 속성 패널의 '내용' 입력창에 포커스+전체선택 되어야 한다."""
         pages = self._make_pages()
         pw = self._open_preview(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value=None):
-            pw._on_canvas_press(FakeEvent(x=250, y=250))
-        self.assertEqual(pages[0]["annots"], [])
+        pw._on_canvas_press(FakeEvent(x=250, y=250))
+        self.assertEqual(len(pages[0]["annots"]), 1)
+        annot = pages[0]["annots"][0]
+        self.assertEqual(annot["text"], pt.DEFAULT_ANNOT_TEXT)
+        self.assertEqual(pw.selected_id, annot["id"])
 
     def test_select_text(self):
         pages = self._make_pages()
         pw = self._open_preview(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="select-me"):
-            pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
         aid = pages[0]["annots"][0]["id"]
         # Phase 4: 새로 만든 텍스트는 즉시 선택되어 속성 패널이 바로 뜬다
         # (X/Y를 바로 mm 로 입력할 수 있어야 하므로).
@@ -298,8 +299,7 @@ class TestPreviewWinText(unittest.TestCase):
         pages = self._make_pages()
         pw = self._open_preview(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="move-me"):
-            pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
         annot = pages[0]["annots"][0]
         x_before, y_before = annot["x"], annot["y"]
 
@@ -322,8 +322,7 @@ class TestPreviewWinText(unittest.TestCase):
         pages = self._make_pages()
         pw = self._open_preview(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="delete-me"):
-            pw._on_canvas_press(FakeEvent(x=280, y=280))
+        pw._on_canvas_press(FakeEvent(x=280, y=280))
         self.assertEqual(len(pages[0]["annots"]), 1)
 
         pw._set_tool("select")
@@ -337,18 +336,18 @@ class TestPreviewWinText(unittest.TestCase):
         pages = self._make_pages()
         pw = self._open_preview(pages, start=0)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="page0-text"):
-            pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
         self.assertEqual(len(pages[0]["annots"]), 1)
         self.assertEqual(len(pages[1]["annots"]), 0)
+        pages[0]["annots"][0]["text"] = "page0-text"
 
         pw._go(1)
         self.assertEqual(pw.idx, 1)
         self.assertIsNone(pw.selected_id)
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="page1-text"):
-            pw._on_canvas_press(FakeEvent(x=200, y=200))
+        pw._on_canvas_press(FakeEvent(x=200, y=200))
         self.assertEqual(len(pages[0]["annots"]), 1)
         self.assertEqual(len(pages[1]["annots"]), 1)
+        pages[1]["annots"][0]["text"] = "page1-text"
         self.assertNotEqual(pages[0]["annots"][0]["text"], pages[1]["annots"][0]["text"])
 
     def test_rotation_roundtrip_for_each_angle(self):
@@ -421,8 +420,7 @@ class TestPropertyPanel(unittest.TestCase):
         self.addCleanup(pw.destroy)
         pw._toggle_edit()
         pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="원본텍스트"):
-            pw._on_canvas_press(FakeEvent(x=click[0], y=click[1]))
+        pw._on_canvas_press(FakeEvent(x=click[0], y=click[1]))
         annot = pages[start]["annots"][0]
         self.assertEqual(pw.selected_id, annot["id"])  # 생성 직후 자동 선택
         return pw, annot
@@ -698,8 +696,7 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         pages = self._load(self.pdf_path_a4)
         pw = self._open(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="anchor-test"):
-            pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
         annot = pages[0]["annots"][0]
         x0, y0 = annot["x"], annot["y"]
         panel = pw.prop_panel
@@ -715,8 +712,7 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         pages = self._load(self.pdf_path_a4)
         pw = self._open(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="rot-test"):
-            pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
         annot = pages[0]["annots"][0]
         panel = pw.prop_panel
         panel.x_var.set("80.00"); panel.y_var.set("40.00"); panel._apply_xy()
@@ -747,8 +743,7 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         pages = self._load(self.pdf_path_a4)
         pw = self._open(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="AB"):
-            pw._on_canvas_press(FakeEvent(x=400, y=400))
+        pw._on_canvas_press(FakeEvent(x=400, y=400))
         annot = pages[0]["annots"][0]
         annot["font_size"] = 30.0
 
@@ -778,8 +773,7 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         pages = self._load(self.pdf_path_a4)
         pw = self._open(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="xy-test"):
-            pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
         annot = pages[0]["annots"][0]
         panel = pw.prop_panel
 
@@ -801,8 +795,7 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         pages = self._load(self.pdf_path_a4)
         pw = self._open(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="zoom-test"):
-            pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
         panel = pw.prop_panel
         panel.x_var.set("100.00"); panel.y_var.set("50.00"); panel._apply_xy()
 
@@ -822,8 +815,7 @@ class TestPhase4ExtraVerification(unittest.TestCase):
 
         pw = self._open(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="a3-test"):
-            pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
         annot = pages[0]["annots"][0]
         panel = pw.prop_panel
         # 패널에 표시되는 페이지 크기 안내 문구도 A3 실제 치수를 반영해야 함
@@ -844,8 +836,7 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         pages = self._load(self.pdf_path_a4)
         pw = self._open(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="size-test"):
-            pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
         annot = pages[0]["annots"][0]
         panel = pw.prop_panel
         panel.size_var.set("22.50")
@@ -887,8 +878,7 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         pages = self._load(self.pdf_path_a4)
         pw = self._open(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="sync-test"):
-            pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
         annot = pages[0]["annots"][0]
         panel = pw.prop_panel
 
@@ -933,8 +923,7 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         pages = self._load(self.pdf_path_a4)
         pw = self._open(pages)
         pw._toggle_edit(); pw._set_tool("text")
-        with patch.object(pt.PreviewWin, "_ask_text", return_value="key-test"):
-            pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
         panel = pw.prop_panel
         panel.x_var.set("100.00")
         entry = self._find_entry_for_var(panel, panel.x_var)
@@ -1012,6 +1001,207 @@ class TestPhase4ExtraVerification(unittest.TestCase):
 
     @staticmethod
     def _find_entry_for_var(panel, var):
+        for child in panel.winfo_children():
+            for w in ([child] + list(child.winfo_children())):
+                if isinstance(w, pt.tk.Entry) and w.cget("textvariable") == str(var):
+                    return w
+        raise AssertionError("해당 변수에 연결된 Entry 를 찾지 못함")
+
+
+# ══════════════════════════════════════════════════════════
+#  6. 편의성 개선 — 생성 흐름(팝업 제거), 드래그 깜빡임 제거,
+#     X/Y 미세조정(방향키·휠)
+# ══════════════════════════════════════════════════════════
+class TestUsabilityImprovements(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pt.TkinterDnD.Tk() if pt.DND_OK else pt.tk.Tk()
+        cls.root.withdraw()
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_test_")
+        cls.pdf_path = os.path.join(cls.tmpdir, "sample.pdf")
+        make_pdf(cls.pdf_path, sizes=((595.28, 841.89),))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _make_pages(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        return ot.pages
+
+    def _open_preview_with_text(self, pages, click=(300, 300)):
+        pw = pt.PreviewWin(self.root, pages, 0)
+        pw.update_idletasks(); pw.geometry("1150x820+0+0"); pw.update(); pw._show()
+        self.addCleanup(pw.destroy)
+        pw._toggle_edit(); pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=click[0], y=click[1]))
+        return pw, pages[0]["annots"][0]
+
+    # ── 생성 흐름: 팝업 없이 즉시 생성 + 바로 타이핑 가능 ──────
+    def test_create_text_has_no_modal_and_prefills_placeholder(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        self.assertEqual(annot["text"], pt.DEFAULT_ANNOT_TEXT)
+        self.assertEqual(pw.selected_id, annot["id"])
+
+    def test_create_text_selects_all_content_for_immediate_typing(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        entry = pw.prop_panel.content_entry
+        self.assertEqual(entry.index("sel.first"), 0)
+        self.assertEqual(entry.index("sel.last"), len(pt.DEFAULT_ANNOT_TEXT))
+
+    # ── 드래그 중 전체 재렌더링(_show) 없이 annot만 다시 그림 ──
+    def test_drag_does_not_trigger_full_page_rerender(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        pw._set_tool("select")
+        x_before, y_before = annot["x"], annot["y"]
+
+        show_calls = []
+        orig_show = pt.PreviewWin._show
+        def counting_show(self):
+            show_calls.append(1)
+            return orig_show(self)
+        with patch.object(pt.PreviewWin, "_show", counting_show):
+            photo_before = pw.photo
+            pw._on_canvas_press(FakeEvent(x=300, y=300))
+            for i in range(10):
+                pw._on_canvas_motion(FakeEvent(x=300+i*4, y=300+i*3))
+            pw._on_canvas_release(FakeEvent(x=340, y=330))
+
+        self.assertEqual(show_calls, [],
+            "드래그 중에는 페이지 배경을 다시 렌더링(_show)하면 안 됨 — 깜빡임의 원인")
+        self.assertIs(pw.photo, photo_before,
+            "드래그 후에도 배경 PhotoImage 객체가 재생성되지 않아야 함")
+        # 재렌더링 없이도 실제 이동 자체는 정상적으로 반영되어야 함
+        self.assertNotEqual((annot["x"], annot["y"]), (x_before, y_before))
+        expect = pt.pdf_to_screen(annot["x"], annot["y"], pw._cur_pw, pw._cur_ph,
+                                   pw._cur_rot, pw._sc, pw._cx, pw._cy)
+        actual = pw.canvas.coords(pw.canvas.find_withtag(f"annot_{annot['id']}")[0])
+        self.assertAlmostEqual(actual[0], expect[0], places=2)
+        self.assertAlmostEqual(actual[1], expect[1], places=2)
+
+    def test_select_and_property_edit_do_not_trigger_full_page_rerender(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        panel = pw.prop_panel
+        show_calls = []
+        orig_show = pt.PreviewWin._show
+        def counting_show(self):
+            show_calls.append(1)
+            return orig_show(self)
+        with patch.object(pt.PreviewWin, "_show", counting_show):
+            pw._select_annot(None)
+            pw._select_annot(annot["id"])
+            panel.size_var.set("20.00"); panel._apply_size()
+            panel.text_var.set("bar"); panel._apply_text()
+        self.assertEqual(show_calls, [],
+            "선택/속성 변경도 배경 재렌더링 없이 annot만 다시 그려야 함")
+
+    # ── X/Y 미세조정: 방향키 / Shift+방향키 / 마우스 휠 ─────────
+    def test_arrow_key_nudges_xy_by_point_one_mm(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        panel = pw.prop_panel
+        panel.x_var.set("100.00"); panel.y_var.set("50.00"); panel._apply_xy()
+
+        panel._nudge_x(0.1)
+        self.assertEqual(panel.x_var.get(), "100.10")
+        self.assertAlmostEqual(pt.pt_to_mm(annot["x"]), 100.10, places=6)
+
+        panel._nudge_x(-0.1)
+        self.assertEqual(panel.x_var.get(), "100.00")
+
+        panel._nudge_y(0.1)
+        self.assertEqual(panel.y_var.get(), "50.10")
+
+    def test_shift_arrow_nudges_xy_by_one_mm(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        panel = pw.prop_panel
+        panel.x_var.set("100.00"); panel.y_var.set("50.00"); panel._apply_xy()
+
+        panel._nudge_x(1.0)
+        self.assertEqual(panel.x_var.get(), "101.00")
+        panel._nudge_y(1.0)
+        self.assertEqual(panel.y_var.get(), "51.00")
+
+    def test_mouse_wheel_nudges_xy(self):
+        # 클래스 공용 root 는 다른 테스트의 창 깜빡임 방지를 위해 withdraw()
+        # 되어 있는데, 창관리자가 없는 Xvfb 에서는 root 가 withdraw 상태면
+        # 합성 MouseWheel(포인터 계열) 이벤트가 자식 Toplevel 까지 전달되지
+        # 않는다 — KeyPress 계열과 달리 이 문제가 있어 이 테스트에서만
+        # deiconify 했다가 되돌린다 (Windows 실사용 환경과는 무관).
+        self.root.deiconify()
+        self.addCleanup(self.root.withdraw)
+
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        panel = pw.prop_panel
+        panel.x_var.set("100.00"); panel._apply_xy()
+        # PreviewWin 의 모달 grab_set() 도 합성 MouseWheel 전달을 막으므로 해제.
+        # (release 가 실제로 반영되려면 이벤트 루프를 한 번 돌려야 한다)
+        pw.grab_release()
+        pw.update()
+
+        entry_x = self._find_entry_for_var_local(panel, panel.x_var)
+        entry_x.event_generate("<MouseWheel>", delta=120)   # 휠 위로
+        self.assertEqual(panel.x_var.get(), "100.10")
+        entry_x.event_generate("<MouseWheel>", delta=-120)  # 휠 아래로
+        self.assertEqual(panel.x_var.get(), "100.00")
+
+    def test_nudge_applies_immediately_without_enter(self):
+        """방향키/휠 조정은 Enter 없이 즉시 annot 과 Canvas 에 반영되어야 한다."""
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        panel = pw.prop_panel
+        panel.x_var.set("100.00"); panel.y_var.set("50.00"); panel._apply_xy()
+
+        panel._nudge_x(0.1)  # Enter 를 누르지 않음
+        self.assertAlmostEqual(pt.pt_to_mm(annot["x"]), 100.10, places=6)
+        expect = pt.pdf_to_screen(annot["x"], annot["y"], pw._cur_pw, pw._cur_ph,
+                                   pw._cur_rot, pw._sc, pw._cx, pw._cy)
+        actual = pw.canvas.coords(pw.canvas.find_withtag(f"annot_{annot['id']}")[0])
+        self.assertAlmostEqual(actual[0], expect[0], places=2)
+        self.assertAlmostEqual(actual[1], expect[1], places=2)
+
+    def test_nudge_invalid_state_does_not_crash(self):
+        """숫자가 아닌 값이 들어있을 때 방향키를 눌러도 예외가 발생하면 안 됨."""
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        panel = pw.prop_panel
+        panel.x_var.set("abc")
+        try:
+            panel._nudge_x(0.1)
+        except Exception as e:
+            self.fail(f"nudge 중 예외 발생: {e}")
+
+    # ── 텍스트 기본 색상은 검정 ──────────────────────────────
+    def test_default_text_color_is_black(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        self.assertEqual(annot["color"], "#000000")
+        self.assertEqual(pw.prop_panel.color_btn.cget("bg"), "#000000")
+        item = pw.canvas.find_withtag(f"annot_{annot['id']}")[0]
+        self.assertEqual(pw.canvas.itemcget(item, "fill"), "#000000")
+
+    # ── Esc 로 미리보기 창이 닫히면 안 됨(오직 ✕ 버튼으로만) ──
+    def test_escape_does_not_close_preview_window(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        destroyed = []
+        pw.bind("<Destroy>", lambda e: destroyed.append(1), add="+")
+        pw.event_generate("<KeyPress>", keysym="Escape")
+        pw.update()
+        self.assertEqual(destroyed, [], "Esc 를 눌러도 미리보기 창이 닫히면 안 됨")
+        self.assertTrue(pw.winfo_exists())
+
+    @staticmethod
+    def _find_entry_for_var_local(panel, var):
         for child in panel.winfo_children():
             for w in ([child] + list(child.winfo_children())):
                 if isinstance(w, pt.tk.Entry) and w.cget("textvariable") == str(var):
