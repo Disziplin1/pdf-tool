@@ -1341,5 +1341,187 @@ class TestUsabilityImprovements(unittest.TestCase):
         raise AssertionError("해당 변수에 연결된 Entry 를 찾지 못함")
 
 
+# ══════════════════════════════════════════════════════════
+#  6. PDF 내보내기 — 텍스트 annot 이 실제로 결과 PDF 에 구워지는지
+#     (편집기에만 보이고 저장된 파일에는 없던 버그의 회귀 테스트)
+# ══════════════════════════════════════════════════════════
+class TestExportBakesTextAnnots(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pt.TkinterDnD.Tk() if pt.DND_OK else pt.tk.Tk()
+        cls.root.withdraw()
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_export_test_")
+        cls.pdf_path = os.path.join(cls.tmpdir, "sample.pdf")
+        make_pdf(cls.pdf_path, sizes=((595.28, 841.89),))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _make_pages(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        return ot, ot.pages
+
+    def _export(self, ot, out_path):
+        with patch.object(pt.filedialog, "asksaveasfilename", return_value=out_path), \
+             patch.object(pt.messagebox, "showinfo"), \
+             patch.object(pt.messagebox, "showwarning"), \
+             patch.object(pt.messagebox, "showerror") as mock_err:
+            ot._export()
+        self.assertFalse(mock_err.called,
+            f"내보내기 중 오류: {mock_err.call_args}")
+
+    def test_exported_pdf_contains_annot_text(self):
+        ot, pages = self._make_pages()
+        pages[0]["annots"].append({
+            "id": 9001, "type": "text", "text": "안녕하세요",
+            "x": pt.mm_to_pt(20), "y": pt.mm_to_pt(30),
+            "font": pt.DEFAULT_ANNOT_FONT, "font_size": 20.0,
+            "color": "#000000", "bold": False, "italic": False,
+            "align": "left", "rotation": 0.0,
+        })
+        out = os.path.join(self.tmpdir, "out1.pdf")
+        self._export(ot, out)
+
+        self.assertTrue(os.path.exists(out))
+        doc = fitz.open(out)
+        text = doc[0].get_text()
+        doc.close()
+        self.assertIn("안녕하세요", text,
+            "편집기에서 추가한 텍스트가 내보낸 PDF 안에 그대로 있어야 함")
+
+    def test_exported_pdf_without_annots_still_works(self):
+        """회귀 방지: annot 이 없는 일반적인 경우(텍스트를 하나도 안 만든 경우)도
+        여전히 정상적으로 내보내져야 한다."""
+        ot, pages = self._make_pages()
+        out = os.path.join(self.tmpdir, "out_noannot.pdf")
+        self._export(ot, out)
+        self.assertTrue(os.path.exists(out))
+        doc = fitz.open(out)
+        self.assertEqual(len(doc), 1)
+        doc.close()
+
+    def test_exported_text_position_matches_editor_coords(self):
+        """텍스트 위치(annot x/y, 좌상단 원점·Y아래증가)가 결과 PDF 에서도
+        같은 지점에 나타나는지, 텍스트 블록의 bbox 로 확인한다."""
+        ot, pages = self._make_pages()
+        x_pt, y_pt = pt.mm_to_pt(15), pt.mm_to_pt(25)
+        pages[0]["annots"].append({
+            "id": 9002, "type": "text", "text": "POS",
+            "x": x_pt, "y": y_pt,
+            "font": pt.DEFAULT_ANNOT_FONT, "font_size": 24.0,
+            "color": "#000000", "bold": False, "italic": False,
+            "align": "left", "rotation": 0.0,
+        })
+        out = os.path.join(self.tmpdir, "out_pos.pdf")
+        self._export(ot, out)
+
+        doc = fitz.open(out)
+        rects = doc[0].search_for("POS")
+        doc.close()
+        self.assertTrue(rects, "삽입한 텍스트를 결과 PDF 에서 찾지 못함")
+        bbox = rects[0]
+        # insert_text 는 베이스라인 기준이라 위쪽으로 약간의 오차(ascent 근처)가
+        # 있을 수 있으므로 넉넉한 허용오차로 확인한다.
+        self.assertAlmostEqual(bbox.x0, x_pt, delta=2.0)
+        self.assertAlmostEqual(bbox.y0, y_pt, delta=6.0)
+
+    def test_exported_text_color_is_applied(self):
+        ot, pages = self._make_pages()
+        pages[0]["annots"].append({
+            "id": 9003, "type": "text", "text": "RED",
+            "x": pt.mm_to_pt(20), "y": pt.mm_to_pt(20),
+            "font": pt.DEFAULT_ANNOT_FONT, "font_size": 18.0,
+            "color": "#FF0000", "bold": False, "italic": False,
+            "align": "left", "rotation": 0.0,
+        })
+        out = os.path.join(self.tmpdir, "out_color.pdf")
+        self._export(ot, out)
+
+        doc = fitz.open(out)
+        raw = doc[0].get_text("rawdict")
+        doc.close()
+        colors = {
+            span["color"]
+            for block in raw["blocks"] for line in block.get("lines", [])
+            for span in line["spans"]
+        }
+        # sRGB 정수로 인코딩된 색상값에서 순수 빨강(0xFF0000)을 찾는다
+        self.assertIn(0xFF0000, colors)
+
+    def test_exported_multipage_annots_are_independent(self):
+        """서로 다른 페이지의 annot 이 섞이지 않고 각자 페이지에만 나타나야 함."""
+        make_pdf_multi = os.path.join(self.tmpdir, "multi.pdf")
+        make_pdf(make_pdf_multi, sizes=((595.28, 841.89), (595.28, 841.89)))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([make_pdf_multi])
+        pages = ot.pages
+        pages[0]["annots"].append({
+            "id": 9101, "type": "text", "text": "PAGE-ONE",
+            "x": pt.mm_to_pt(20), "y": pt.mm_to_pt(20),
+            "font": pt.DEFAULT_ANNOT_FONT, "font_size": 16.0,
+            "color": "#000000", "bold": False, "italic": False,
+            "align": "left", "rotation": 0.0,
+        })
+        pages[1]["annots"].append({
+            "id": 9102, "type": "text", "text": "PAGE-TWO",
+            "x": pt.mm_to_pt(20), "y": pt.mm_to_pt(20),
+            "font": pt.DEFAULT_ANNOT_FONT, "font_size": 16.0,
+            "color": "#000000", "bold": False, "italic": False,
+            "align": "left", "rotation": 0.0,
+        })
+        out = os.path.join(self.tmpdir, "out_multi.pdf")
+        self._export(ot, out)
+
+        doc = fitz.open(out)
+        t0, t1 = doc[0].get_text(), doc[1].get_text()
+        doc.close()
+        self.assertIn("PAGE-ONE", t0)
+        self.assertNotIn("PAGE-TWO", t0)
+        self.assertIn("PAGE-TWO", t1)
+        self.assertNotIn("PAGE-ONE", t1)
+
+    def test_duplicated_page_annots_do_not_leak_into_original(self):
+        """페이지를 복제한 뒤 복제본에만 텍스트를 추가해도, 같은 원본
+        (src, pidx) 를 공유하는 원본 페이지의 결과물에는 그 텍스트가
+        나타나면 안 된다 (소스 문서를 직접 수정하면 이게 깨질 수 있음)."""
+        ot, pages = self._make_pages()
+        ot._hov_action("dup", 0)
+        self.assertEqual(len(ot.pages), 2)
+        dup = ot.pages[1]
+        dup["annots"].append({
+            "id": 9201, "type": "text", "text": "ONLY-IN-DUP",
+            "x": pt.mm_to_pt(20), "y": pt.mm_to_pt(20),
+            "font": pt.DEFAULT_ANNOT_FONT, "font_size": 16.0,
+            "color": "#000000", "bold": False, "italic": False,
+            "align": "left", "rotation": 0.0,
+        })
+        out = os.path.join(self.tmpdir, "out_dup.pdf")
+        self._export(ot, out)
+
+        doc = fitz.open(out)
+        t0, t1 = doc[0].get_text(), doc[1].get_text()
+        doc.close()
+        self.assertNotIn("ONLY-IN-DUP", t0)
+        self.assertIn("ONLY-IN-DUP", t1)
+
+    def test_export_applies_page_rotation_on_top_of_native(self):
+        """pg["rot"] 만큼 페이지가 회전되어 저장되어야 한다 (원본 문서
+        자체의 회전은 0 인 일반적인 경우)."""
+        ot, pages = self._make_pages()
+        pages[0]["rot"] = 90
+        out = os.path.join(self.tmpdir, "out_rot.pdf")
+        self._export(ot, out)
+
+        doc = fitz.open(out)
+        rotation = doc[0].rotation
+        doc.close()
+        self.assertEqual(rotation, 90)
+
+
 if __name__ == "__main__":
     unittest.main()

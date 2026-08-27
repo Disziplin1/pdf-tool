@@ -299,6 +299,143 @@ def screen_to_pdf(px, py, page_w_pt, page_h_pt, rot, scale, cx, cy):
 
 
 # ══════════════════════════════════════════════════════════
+#  텍스트 annot 을 실제 PDF 로 굽기 (내보내기 시점)
+#
+#  annot["x"]/["y"] 는 위 좌표계(원본 페이지 기준 좌상단 원점, Y 아래
+#  증가) 로 저장되어 있다. PyMuPDF 의 insert_text() 좌표도 동일하게
+#  "회전 적용 전 콘텐츠 스트림" 기준이므로, 소스 PDF 자체에 이미 걸려
+#  있던 회전(native_rot)만 역변환해주면 그대로 삽입할 수 있다 — 우리
+#  앱이 추가한 회전(pg["rot"])은 페이지 자체를 회전시키는 것이므로
+#  텍스트를 따로 변환할 필요가 없다 (페이지 콘텐츠와 함께 회전됨).
+# ══════════════════════════════════════════════════════════
+def _color_hex_to_rgb01(hexcol):
+    h = (hexcol or DEFAULT_ANNOT_COLOR).lstrip("#")
+    try:
+        return tuple(int(h[i:i+2], 16) / 255.0 for i in (0, 2, 4))
+    except Exception:
+        return (0.0, 0.0, 0.0)
+
+
+def _find_font_file(family, bold=False, italic=False):
+    """Windows 레지스트리에서 폰트 패밀리 이름에 맞는 실제 폰트 파일
+    경로를 찾는다. Windows 가 아니거나 찾지 못하면 None (호출부에서
+    한글도 지원하는 PyMuPDF 내장 CJK 폰트로 대체)."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+        fonts_dir = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
+        key_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+        reg = {}
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
+            i = 0
+            while True:
+                try:
+                    name, value, _ = winreg.EnumValue(key, i)
+                except OSError:
+                    break
+                i += 1
+                base = name.replace("(TrueType)", "").replace("(OpenType)", "").strip()
+                reg[base] = value
+
+        def resolve(path):
+            if not os.path.isabs(path):
+                path = os.path.join(fonts_dir, path)
+            return path if os.path.exists(path) else None
+
+        suffixes = []
+        if bold and italic: suffixes.append(" Bold Italic")
+        if bold: suffixes.append(" Bold")
+        if italic: suffixes.append(" Italic")
+        suffixes.append("")
+        for suf in suffixes:
+            hit = reg.get(f"{family}{suf}")
+            if hit:
+                resolved = resolve(hit)
+                if resolved: return resolved
+        for base, path in reg.items():
+            if base.startswith(family):
+                resolved = resolve(path)
+                if resolved: return resolved
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_annot_font(family, bold, italic, alias):
+    """(fitz.Font, fontfile 경로 또는 None, insert_text 에 넘길 fontname)
+    을 반환한다. 실제 폰트 파일을 못 찾으면 한글을 포함해 폭넓게
+    지원하는 PyMuPDF 내장 CJK 폴백 폰트("korea")로 대체하는데, 이 경우
+    fontname 은 반드시 그 예약된 이름("korea") 그대로 써야 하므로 우리가
+    붙인 별칭(alias) 대신 그 이름을 함께 돌려준다."""
+    path = _find_font_file(family, bold, italic)
+    try:
+        if path:
+            return fitz.Font(fontfile=path), path, alias
+    except Exception:
+        pass
+    try:
+        return fitz.Font(fontname="korea"), None, "korea"
+    except Exception:
+        return fitz.Font(fontname="helv"), None, "helv"
+
+
+def _bake_text_annot(page, a, raw_w, raw_h, native_rot, font_cache):
+    """annot 하나를 page(원본 회전 native_rot 을 아직 갖고 있는 상태)에
+    실제 텍스트로 삽입한다. font_cache 는 (family,bold,italic) ->
+    (fitz.Font, fontfile, insert_text 용 fontname) 을 캐싱해 같은 폰트를
+    여러 번 등록하지 않게 한다."""
+    x_pt, y_pt = a["x"], a["y"]
+    if native_rot:
+        x_pt, y_pt = unrotate_point_pt(x_pt, y_pt, raw_w, raw_h, native_rot)
+
+    family = a.get("font", DEFAULT_ANNOT_FONT)
+    bold = bool(a.get("bold"))
+    italic = bool(a.get("italic"))
+    cache_key = (family, bold, italic)
+    if cache_key not in font_cache:
+        font_cache[cache_key] = _resolve_annot_font(
+            family, bold, italic, alias=f"F{len(font_cache)}")
+    font, fontfile, fontname = font_cache[cache_key]
+
+    size = a.get("font_size", DEFAULT_ANNOT_SIZE)
+    color = _color_hex_to_rgb01(a.get("color", DEFAULT_ANNOT_COLOR))
+    align = a.get("align", "left")
+    lines = (a.get("text", "") or "").split("\n")
+    try:
+        ascent = size * (font.ascender or 0.8)
+    except Exception:
+        ascent = size * 0.8
+    line_height = size * 1.2
+    try:
+        widths = [font.text_length(ln, fontsize=size) for ln in lines]
+    except Exception:
+        widths = [0.0 for _ in lines]
+    max_w = max(widths) if widths else 0.0
+
+    # Tk canvas 의 angle(반시계+)과 통일하려고 부호를 반전했던 것과 동일한
+    # 이유로, PyMuPDF Matrix.prerotate() 도 반시계+ 이므로 부호를 반전한다.
+    rot = (-a.get("rotation", 0.0)) % 360
+    anchor = fitz.Point(x_pt, y_pt)
+    mat = fitz.Matrix(1, 1).prerotate(rot) if rot else None
+
+    for i, (line, w) in enumerate(zip(lines, widths)):
+        if align == "center": dx = (max_w - w) / 2
+        elif align == "right": dx = max_w - w
+        else: dx = 0.0
+        px, py = x_pt + dx, y_pt + ascent + i * line_height
+        kwargs = dict(fontsize=size, color=color, fontname=fontname)
+        if fontfile:
+            kwargs["fontfile"] = fontfile
+        if mat is not None:
+            kwargs["morph"] = (anchor, mat)
+        try:
+            page.insert_text(fitz.Point(px, py), line, **kwargs)
+        except Exception:
+            pass
+
+
+# ══════════════════════════════════════════════════════════
 #  텍스트 속성 패널 (PreviewWin 우측에 붙는다, 선택 시에만 표시)
 # ══════════════════════════════════════════════════════════
 class TextPropPanel(tk.Frame):
@@ -1672,19 +1809,62 @@ class OrganizeTab(tk.Frame):
             initialdir=init_dir, initialfile="output.pdf")
         if not out: return
         try:
-            w     = PdfWriter()
-            cache = {}
-            for pg in self.pages:
-                src = pg["src"]
-                if src not in cache: cache[src] = PdfReader(src)
-                page  = cache[src].pages[pg["pidx"]]
-                added = w.add_page(page)   # 원본과 독립된 클론 객체 반환
-                rot   = pg.get("rot",0)
-                if rot: added.rotate(rot)
-            with open(out,"wb") as f: w.write(f)
+            if PREVIEW_OK:
+                self._export_with_fitz(out)
+            else:
+                self._export_with_pypdf(out)
             messagebox.showinfo("완료",f"저장 완료!\n{out}")
         except Exception as e:
             messagebox.showerror("오류",str(e))
+
+    def _export_with_pypdf(self, out):
+        """PyMuPDF(fitz) 를 못 쓰는 환경용 대체 경로. 텍스트 annot 을
+        구울 수단이 없으므로(편집 자체가 fitz 없이는 불가능해 이 경우
+        annots 는 항상 비어 있다) 페이지 복사 + 회전만 처리한다."""
+        w     = PdfWriter()
+        cache = {}
+        for pg in self.pages:
+            src = pg["src"]
+            if src not in cache: cache[src] = PdfReader(src)
+            page  = cache[src].pages[pg["pidx"]]
+            added = w.add_page(page)   # 원본과 독립된 클론 객체 반환
+            rot   = pg.get("rot",0)
+            if rot: added.rotate(rot)
+        with open(out,"wb") as f: w.write(f)
+
+    def _export_with_fitz(self, out):
+        """페이지를 복사하고 우리 앱에서 추가한 회전(pg["rot"])을 적용한
+        뒤, 텍스트 annot 을 실제 PDF 콘텐츠로 굽는다. 소스 문서를 직접
+        수정하지 않고(페이지 복제 시 같은 원본을 공유할 수 있으므로)
+        out_doc 에 복사해 넣은 뒤 그 복사본에만 텍스트를 그린다."""
+        out_doc    = fitz.open()
+        src_cache  = {}
+        font_cache = {}
+        try:
+            for pg in self.pages:
+                src = pg["src"]
+                if src not in src_cache: src_cache[src] = fitz.open(src)
+                src_doc    = src_cache[src]
+                pidx       = pg["pidx"]
+                native_rot = src_doc[pidx].rotation
+
+                out_doc.insert_pdf(src_doc, from_page=pidx, to_page=pidx)
+                out_page  = out_doc[-1]
+                extra_rot = pg.get("rot", 0)
+                if extra_rot:
+                    out_page.set_rotation((native_rot + extra_rot) % 360)
+
+                annots = pg.get("annots", [])
+                if annots:
+                    raw_w, raw_h = rotated_size_pt(
+                        pg.get("page_w_pt") or 0, pg.get("page_h_pt") or 0, native_rot)
+                    for a in annots:
+                        if a.get("type") == "text":
+                            _bake_text_annot(out_page, a, raw_w, raw_h, native_rot, font_cache)
+            out_doc.save(out)
+        finally:
+            out_doc.close()
+            for d in src_cache.values(): d.close()
 
 
 # ══════════════════════════════════════════════════════════
