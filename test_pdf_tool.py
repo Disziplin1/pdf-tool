@@ -185,6 +185,23 @@ class TestOrganizeTab(unittest.TestCase):
         r = PdfReader(out_path)
         self.assertEqual(len(r.pages), 2)
 
+    # ── 호버 버튼(🔍/↺/⧉/🗑) 위에서는 손가락 커서로 구분 ─────────
+    def test_hover_shows_hand_cursor_over_action_buttons_and_move_cursor_over_card(self):
+        ot = self._new_tab_with_pdf()
+        ot.update_idletasks()
+        ot._render()
+
+        x0, y0 = ot._card_xy(0)
+        # 카드 본체(버튼이 아닌 부분) 위에서는 이동 가능 커서
+        ot._on_hover(FakeEvent(x=x0 + ot.CW // 2, y=y0 + 10))
+        self.assertEqual(ot.canvas.cget("cursor"), "fleur")
+
+        # 🔍(첫 번째 호버 버튼, rx=0.15) 위에서는 클릭 가능 손가락 커서
+        bx = x0 + int(ot.CW * 0.15)
+        by = y0 + ot.CH - ot.BBAR_H // 2
+        ot._on_hover(FakeEvent(x=bx, y=by))
+        self.assertEqual(ot.canvas.cget("cursor"), "hand2")
+
 
 # ══════════════════════════════════════════════════════════
 #  3. PreviewWin — Phase 3 텍스트 기본 기능 (생성/표시/선택/이동/삭제)
@@ -1199,6 +1216,25 @@ class TestUsabilityImprovements(unittest.TestCase):
         pw.update()
         self.assertEqual(destroyed, [], "Esc 를 눌러도 미리보기 창이 닫히면 안 됨")
         self.assertTrue(pw.winfo_exists())
+
+    # ── 전체화면 기본 시작 + 토글 버튼으로 창모드 전환 ─────────
+    def test_preview_starts_fullscreen_and_toggle_switches_to_windowed(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        self.assertTrue(pw.is_fullscreen, "미리보기는 기본으로 전체화면 시작해야 함")
+        self.assertEqual(pw.fullscreen_btn.cget("text"), "⛶ 창모드")
+
+        pw._toggle_fullscreen()
+        self.assertFalse(pw.is_fullscreen)
+        self.assertEqual(pw.fullscreen_btn.cget("text"), "⛶ 전체화면")
+        try:
+            self.assertFalse(bool(pw.attributes("-fullscreen")))
+        except pt.tk.TclError:
+            pass  # 이 플랫폼에서 -fullscreen 속성 조회가 안 되면 상태 플래그만으로 충분
+
+        pw._toggle_fullscreen()
+        self.assertTrue(pw.is_fullscreen)
+        self.assertEqual(pw.fullscreen_btn.cget("text"), "⛶ 창모드")
 
     @staticmethod
     def _find_entry_for_var_local(panel, var):

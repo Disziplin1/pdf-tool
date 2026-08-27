@@ -588,13 +588,21 @@ class PreviewWin(tk.Toplevel):
 
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         w, h   = min(940, sw-60), min(820, sh-60)
-        self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+        self._windowed_geometry = f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}"  # 창모드 전환 시 복귀할 크기
+        self.geometry(self._windowed_geometry)
         self.title("미리보기")
         self.configure(bg=BG)
         self.transient(parent)
         self.grab_set()
         self.focus_set()
         self.resizable(True, True)
+        # 텍스트 작업 공간을 넓게 쓰도록 기본은 전체화면으로 시작하고,
+        # 화면이 크다고 느끼는 사람은 상단 토글 버튼으로 창모드로 바꿀 수 있다.
+        self.is_fullscreen = True
+        try:
+            self.attributes("-fullscreen", True)
+        except tk.TclError:
+            self.is_fullscreen = False
 
         self._build()
         self.after(60, self._show)
@@ -623,6 +631,11 @@ class PreviewWin(tk.Toplevel):
                   bg=BG, fg=TEXT_DIM, font=(FM, 14),
                   relief="flat", bd=0, cursor="hand2",
                   activebackground=BG).pack(side="right")
+        self.fullscreen_btn = tk.Button(top, text="⛶ 창모드", command=self._toggle_fullscreen,
+                  bg=TOOLBAR, fg=TEXT_DIM, font=FONT_B,
+                  relief="flat", padx=12, pady=5, cursor="hand2",
+                  bd=0, activebackground=_shade(TOOLBAR, 0.92))
+        self.fullscreen_btn.pack(side="right", padx=(0,10))
         self.edit_btn = tk.Button(top, text="✎ 편집 모드", command=self._toggle_edit,
                   bg=TOOLBAR, fg=TEXT_DIM, font=FONT_B,
                   relief="flat", padx=12, pady=5, cursor="hand2",
@@ -861,6 +874,17 @@ class PreviewWin(tk.Toplevel):
         self._drag_sx = None
         self._drag_sy = None
         self.canvas.config(cursor="")
+
+    # ── 전체화면 / 창모드 전환 ─────────────────────────────────
+    def _toggle_fullscreen(self):
+        self.is_fullscreen = not self.is_fullscreen
+        try:
+            self.attributes("-fullscreen", self.is_fullscreen)
+        except tk.TclError:
+            self.is_fullscreen = False
+        if not self.is_fullscreen:
+            self.geometry(self._windowed_geometry)
+        self.fullscreen_btn.config(text="⛶ 창모드" if self.is_fullscreen else "⛶ 전체화면")
 
     # ── 편집 모드 / 도구 선택 ─────────────────────────────────
     def _toggle_edit(self):
@@ -1354,7 +1378,17 @@ class OrganizeTab(tk.Frame):
             self.canvas.delete("hov")
             self.hover_idx = idx
             if idx is not None: self._draw_hover_ol(idx)
-            # 카드 위에서는 "이동 가능" 커서로 드래그 가능함을 표시
+
+        # 🔍/↺/⧉/🗑 같은 작은 액션 버튼 위에서는 클릭 가능함을 보여주는
+        # 손가락 커서로, 카드 본체 위에서는 "이동 가능" 커서로 구분한다.
+        on_button = False
+        for item in self.canvas.find_overlapping(cx-4, cy-4, cx+4, cy+4):
+            if any(t.startswith("ha_") for t in self.canvas.gettags(item)):
+                on_button = True
+                break
+        if on_button:
+            self.canvas.config(cursor="hand2")
+        else:
             self.canvas.config(cursor="fleur" if idx is not None else "")
 
     # ── 캔버스 이벤트 ────────────────────────────────────────
