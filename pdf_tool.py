@@ -151,6 +151,7 @@ DEFAULT_ANNOT_TEXT  = "텍스트"  # 새 텍스트 생성 시 기본 내용(바�
 
 # 도형(사각형/화살표/강조) annot 기본값
 DEFAULT_SHAPE_LINE_COLOR = "#000000"
+DEFAULT_RECT_LINE_COLOR  = "#FFFFFF"  # 새로 그리는 사각형은 흰 테두리로 시작
 DEFAULT_SHAPE_LINE_WIDTH = 2.0     # pt
 DEFAULT_SHAPE_FILL_COLOR = "#FFFFFF"
 DEFAULT_HIGHLIGHT_COLOR  = "#FFFF00"
@@ -512,6 +513,52 @@ def _bake_shape_annot(page, a, raw_w, raw_h, native_rot):
             hl.update()
     except Exception:
         pass
+
+
+def _bake_all_annots(page, pg, native_rot, font_cache):
+    """pg 의 모든 텍스트/도형 annot 을 page 에 굽는다. 내보내기와 정리
+    탭 카드 썸네일 미리보기가 같은 로직을 공유해, 미리보기에서 본 것과
+    실제 저장 결과가 어긋나지 않게 한다."""
+    annots = pg.get("annots", [])
+    if not annots: return
+    raw_w, raw_h = rotated_size_pt(pg.get("page_w_pt") or 0, pg.get("page_h_pt") or 0, native_rot)
+    for a in annots:
+        if a.get("type") == "text":
+            _bake_text_annot(page, a, raw_w, raw_h, native_rot, font_cache)
+        elif a.get("type") in ("rect", "arrow", "highlight"):
+            _bake_shape_annot(page, a, raw_w, raw_h, native_rot)
+
+
+def make_thumb_for_page(pg, tw, th, factor=2.5):
+    """카드 썸네일을 텍스트/도형 annot 까지 반영해서 만든다 — 내보내기와
+    동일한 굽기 로직(_bake_all_annots)을 재사용해서 정리 탭 미리보기와
+    실제 저장 결과가 어긋나지 않게 한다. 우리 앱이 추가한 회전(pg["rot"])
+    은 이 "회전 전" 기준 이미지에는 반영하지 않는다 — 기존 관례대로
+    화면에 표시할 때마다 별도로 PIL 회전을 적용한다
+    (OrganizeTab._render/_draw_ghost 참고)."""
+    if not PREVIEW_OK: return None
+    try:
+        src_doc = fitz.open(pg["src"])
+        pidx = pg["pidx"]
+        if pidx >= len(src_doc):
+            src_doc.close(); return None
+        native_rot = src_doc[pidx].rotation
+
+        tmp_doc = fitz.open()
+        tmp_doc.insert_pdf(src_doc, from_page=pidx, to_page=pidx)
+        page = tmp_doc[0]
+        src_doc.close()
+
+        _bake_all_annots(page, pg, native_rot, {})
+
+        sc  = min(tw/page.rect.width, th/page.rect.height) * factor
+        pix = page.get_pixmap(matrix=fitz.Matrix(sc, sc), alpha=False)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        img.thumbnail((int(tw*factor), int(th*factor)), Image.LANCZOS)
+        tmp_doc.close()
+        return img
+    except Exception:
+        return None
 
 
 # ══════════════════════════════════════════════════════════
@@ -1027,6 +1074,7 @@ class PreviewWin(tk.Toplevel):
         self.selected_id = None      # 선택된 annot id
         self._move_state = None      # 드래그로 이동 중인 annot 정보
         self._shape_draft = None     # 드래그로 도형을 새로 그리는 중인 상태(미리보기용)
+        self._resize_state = None    # 핸들을 드래그해 도형 크기/끝점을 조정 중인 상태
         # 마지막 _show() 렌더링 기준 좌표 변환 파라미터 (screen<->pdf 변환용)
         self._sc      = None
         self._cx       = None
@@ -1328,6 +1376,10 @@ class PreviewWin(tk.Toplevel):
             # 캔버스가 아니라 그 입력창으로 먼저 소비돼버린다. 캔버스를
             # 클릭하는 순간 포커스를 캔버스로 되돌려 단축키가 항상 먹게 한다.
             self.canvas.focus_set()
+            handle = self._handle_hit_test(e.x, e.y)
+            if handle is not None:
+                self._resize_state = handle
+                return
             hit = self._hit_test(e.x, e.y)
             if hit is not None:
                 self._select_annot(hit["id"])
@@ -1350,6 +1402,9 @@ class PreviewWin(tk.Toplevel):
         if self._shape_draft is not None:
             self._update_shape_draft(e)
             return
+        if self._resize_state is not None:
+            self._resize_annot(e)
+            return
         if self._move_state is not None:
             self._drag_annot(e)
             return
@@ -1359,8 +1414,13 @@ class PreviewWin(tk.Toplevel):
         if self._shape_draft is not None:
             self._finish_shape_draft(e)
             return
+        if self._resize_state is not None:
+            self._resize_state = None
+            if self.on_change: self.on_change()
+            return
         if self._move_state is not None:
             self._move_state = None
+            if self.on_change: self.on_change()
             return
         self._pan_end(e)
 
@@ -1398,7 +1458,7 @@ class PreviewWin(tk.Toplevel):
             annot = {"id": next(_id_gen), "type": "rect",
                      "x0": min(x0_pt,x1_pt), "y0": min(y0_pt,y1_pt),
                      "x1": max(x0_pt,x1_pt), "y1": max(y0_pt,y1_pt),
-                     "line_color": DEFAULT_SHAPE_LINE_COLOR, "line_width": DEFAULT_SHAPE_LINE_WIDTH,
+                     "line_color": DEFAULT_RECT_LINE_COLOR, "line_width": DEFAULT_SHAPE_LINE_WIDTH,
                      "fill_color": DEFAULT_SHAPE_FILL_COLOR, "fill_enabled": False}
         elif tool == "highlight":
             annot = {"id": next(_id_gen), "type": "highlight",
@@ -1424,11 +1484,22 @@ class PreviewWin(tk.Toplevel):
 
     def _pan_move(self, e):
         if self._drag_sx is None: return
-        self.pan_x += e.x - self._drag_sx
-        self.pan_y += e.y - self._drag_sy
+        dx = e.x - self._drag_sx
+        dy = e.y - self._drag_sy
+        self.pan_x += dx
+        self.pan_y += dy
         self._drag_sx = e.x
         self._drag_sy = e.y
-        self._show()
+        if self._sc is None:
+            self._show()
+            return
+        # 팬은 이미지 자체가 바뀌는 게 아니라 위치만 바뀌는 것이므로, 매
+        # 프레임 PDF를 다시 열어 렌더링(_show)하면 "지웠다가 다시 그리는"
+        # 순간이 보여 깜빡인다. 캔버스에 이미 있는 항목들을 그만큼만
+        # 이동시키고, 좌표 변환 기준점(_cx/_cy)도 같이 갱신한다.
+        self.canvas.move("all", dx, dy)
+        self._cx += dx
+        self._cy += dy
 
     def _pan_end(self, e):
         self._drag_sx = None
@@ -1481,6 +1552,59 @@ class PreviewWin(tk.Toplevel):
         return isinstance(w, (tk.Entry, tk.Spinbox, tk.Text, ttk.Entry, ttk.Combobox))
 
     # ── annot(텍스트) 선택/생성/이동/삭제 ─────────────────────
+    # ── 도형 크기/끝점 조정 핸들 ────────────────────────────
+    HANDLE_R = 6   # 핸들 히트테스트 반경(px)
+
+    def _shape_handle_points(self, a):
+        """도형의 조정 가능한 기준점들을 (이름, (x_pt,y_pt)) 목록으로."""
+        if a.get("type") == "arrow":
+            return [("p0", (a["x0"], a["y0"])), ("p1", (a["x1"], a["y1"]))]
+        return [("x0y0", (a["x0"], a["y0"])), ("x1y0", (a["x1"], a["y0"])),
+                ("x0y1", (a["x0"], a["y1"])), ("x1y1", (a["x1"], a["y1"]))]
+
+    def _handle_hit_test(self, ex, ey):
+        """선택된 도형(사각형/화살표)의 핸들 위를 클릭했는지 확인한다.
+        핸들은 선택된 도형에만 그려지므로, 그 도형에 대해서만 판정한다."""
+        if self._sc is None or self.selected_id is None:
+            return None
+        a = self._find_annot(self.selected_id)
+        if a is None or a.get("type") not in ("rect", "arrow"):
+            return None
+        for name, (x_pt, y_pt) in self._shape_handle_points(a):
+            sx, sy = pdf_to_screen(x_pt, y_pt, self._cur_pw, self._cur_ph,
+                                    self._cur_rot, self._sc, self._cx, self._cy)
+            if abs(sx-ex) <= self.HANDLE_R and abs(sy-ey) <= self.HANDLE_R:
+                return {"annot_id": a["id"], "handle": name}
+        return None
+
+    def _resize_annot(self, e):
+        if self._sc is None or self._resize_state is None: return
+        a = self._find_annot(self._resize_state["annot_id"])
+        if a is None: return
+        handle = self._resize_state["handle"]
+        x_pt, y_pt = screen_to_pdf(e.x, e.y, self._cur_pw, self._cur_ph,
+                                    self._cur_rot, self._sc, self._cx, self._cy)
+        if a.get("type") == "arrow":
+            if handle == "p0": a["x0"], a["y0"] = x_pt, y_pt
+            else:              a["x1"], a["y1"] = x_pt, y_pt
+        else:
+            if handle in ("x0y0", "x0y1"): a["x0"] = x_pt
+            else:                          a["x1"] = x_pt
+            if handle in ("x0y0", "x1y0"): a["y0"] = y_pt
+            else:                          a["y1"] = y_pt
+            # 반대쪽 핸들을 넘어서 드래그하면 x0<x1, y0<y1 이 되도록 값을
+            # 맞바꾸고, 다음 프레임에도 같은 핸들을 계속 잡고 있을 수 있게
+            # 그 핸들이 가리키는 이름도 함께 갱신한다.
+            if a["x0"] > a["x1"]:
+                a["x0"], a["x1"] = a["x1"], a["x0"]
+                handle = handle.replace("x0","tmp").replace("x1","x0").replace("tmp","x1")
+            if a["y0"] > a["y1"]:
+                a["y0"], a["y1"] = a["y1"], a["y0"]
+                handle = handle.replace("y0","tmp").replace("y1","y0").replace("tmp","y1")
+            self._resize_state["handle"] = handle
+        self.shape_panel.refresh_xy_only()
+        self._redraw_annots()
+
     def _hit_test(self, ex, ey):
         """캔버스 좌표(ex,ey) 위에 있는 현재 페이지의 annot 을 찾는다.
         사각형/강조처럼 채우기가 없을 수 있는 도형은 Tk 캔버스 자체
@@ -1668,6 +1792,20 @@ class PreviewWin(tk.Toplevel):
                     bbox[0]-pad, bbox[1]-pad, bbox[2]+pad, bbox[3]+pad,
                     outline=ACCENT, width=2, dash=(4,2),
                     tags=("annot", "annotsel"))
+            if a.get("type") in ("rect", "arrow"):
+                self._draw_shape_handles(a)
+
+    def _draw_shape_handles(self, a):
+        """선택된 사각형/화살표의 끝점에 마우스로 잡아 크기/방향을 조정할
+        수 있는 작은 사각 핸들을 그린다."""
+        r = self.HANDLE_R
+        for _, (x_pt, y_pt) in self._shape_handle_points(a):
+            sx, sy = pdf_to_screen(x_pt, y_pt, self._cur_pw, self._cur_ph,
+                                    self._cur_rot, self._sc, self._cx, self._cy)
+            self.canvas.create_rectangle(
+                sx-r, sy-r, sx+r, sy+r,
+                fill=ACCENT, outline="white", width=1,
+                tags=("annot", "annotsel"))
 
     # ── 편집 ────────────────────────────────────────────────
     def _rotate(self, deg):
@@ -1790,6 +1928,7 @@ class OrganizeTab(tk.Frame):
         self.canvas.bind("<ButtonPress-1>",   self._on_press)
         self.canvas.bind("<B1-Motion>",       self._on_b1motion)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<Double-Button-1>", self._on_double_click)
         self.canvas.bind("<MouseWheel>",
                          lambda e: self.canvas.yview_scroll(-1*(e.delta//120), "units"))
         self.canvas.bind("<Control-MouseWheel>",
@@ -2106,11 +2245,23 @@ class OrganizeTab(tk.Frame):
             if tgt > src: tgt -= 1
             if src != tgt:
                 pg = self.pages.pop(src); self.pages.insert(tgt, pg)
-        # 단순 클릭은 아무 동작 없음 (미리보기는 🔍 버튼으로만)
+        # 단순 클릭은 아무 동작 없음 (미리보기는 🔍 버튼 또는 더블클릭으로)
         self.drag_src = self.drag_tgt = None
         self.drag_moved = False
         self.canvas.config(cursor="")
         self._render()
+
+    def _on_double_click(self, event):
+        """카드를 더블클릭하면 🔍 버튼과 동일하게 미리보기를 연다."""
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+        for item in self.canvas.find_overlapping(cx-4, cy-4, cx+4, cy+4):
+            for t in self.canvas.gettags(item):
+                if t.startswith("ha_") or t.startswith("cb_"):
+                    return   # 액션 버튼/체크박스 위에서는 그쪽 단일클릭 동작만 수행
+        idx = self._xy_to_card(cx, cy)
+        if idx is not None:
+            self._open_preview(idx)
 
     # ── 좌표 변환 ───────────────────────────────────────────
     def _xy_to_card(self, cx, cy):
@@ -2212,7 +2363,17 @@ class OrganizeTab(tk.Frame):
     def _open_preview(self, idx):
         if not self.pages: return
         PreviewWin(self.winfo_toplevel(), self.pages, idx,
-                   on_change=self._render)   # 편집 후 그리드 자동 갱신
+                   on_change=self._on_preview_change)   # 편집 후 그리드 자동 갱신
+
+    def _on_preview_change(self):
+        """미리보기에서 텍스트/도형을 추가·수정해도 정리 탭 카드
+        썸네일에는 반영되지 않던 문제 수정 — 내보내기와 같은 굽기
+        로직으로 썸네일을 다시 만들어 캐시를 갱신한다."""
+        for pg in self.pages:
+            thumb = make_thumb_for_page(pg, self.TW0, self.TH0)
+            if thumb is not None:
+                pg["pil"] = thumb
+        self._render()
 
     # ── 내보내기 ────────────────────────────────────────────
     def _export(self):
@@ -2269,15 +2430,7 @@ class OrganizeTab(tk.Frame):
                 if extra_rot:
                     out_page.set_rotation((native_rot + extra_rot) % 360)
 
-                annots = pg.get("annots", [])
-                if annots:
-                    raw_w, raw_h = rotated_size_pt(
-                        pg.get("page_w_pt") or 0, pg.get("page_h_pt") or 0, native_rot)
-                    for a in annots:
-                        if a.get("type") == "text":
-                            _bake_text_annot(out_page, a, raw_w, raw_h, native_rot, font_cache)
-                        elif a.get("type") in ("rect", "arrow", "highlight"):
-                            _bake_shape_annot(out_page, a, raw_w, raw_h, native_rot)
+                _bake_all_annots(out_page, pg, native_rot, font_cache)
             out_doc.save(out)
         finally:
             out_doc.close()

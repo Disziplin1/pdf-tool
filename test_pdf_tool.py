@@ -202,6 +202,55 @@ class TestOrganizeTab(unittest.TestCase):
         ot._on_hover(FakeEvent(x=bx, y=by))
         self.assertEqual(ot.canvas.cget("cursor"), "hand2")
 
+    # ── 카드 더블클릭 시 🔍 버튼과 동일하게 미리보기 열림 ──────
+    def test_double_click_on_card_opens_preview(self):
+        ot = self._new_tab_with_pdf()
+        ot.update_idletasks()
+        ot._render()
+        x0, y0 = ot._card_xy(0)
+        with patch.object(pt, "PreviewWin") as MockPreview:
+            ot._on_double_click(FakeEvent(x=x0 + ot.CW // 2, y=y0 + 10))
+        MockPreview.assert_called_once()
+        self.assertEqual(MockPreview.call_args[0][2], 0)   # idx 인자
+
+    def test_double_click_on_action_button_does_not_double_open(self):
+        """🔍 버튼 위에서 더블클릭하면(=버튼을 두 번 누른 상황) 더블클릭
+        핸들러가 또 한 번 미리보기를 열어 중복 실행되면 안 된다."""
+        ot = self._new_tab_with_pdf()
+        ot.update_idletasks()
+        ot._render()
+        x0, y0 = ot._card_xy(0)
+        bx = x0 + int(ot.CW * 0.15)
+        by = y0 + ot.CH - ot.BBAR_H // 2
+        # 실제 사용 흐름처럼, 액션 바가 그려지도록 먼저 카드를 호버한다
+        # (호버 액션 버튼은 _render() 가 아니라 _on_hover 가 그린다).
+        ot._on_hover(FakeEvent(x=bx, y=by))
+        with patch.object(pt, "PreviewWin") as MockPreview:
+            ot._on_double_click(FakeEvent(x=bx, y=by))
+        MockPreview.assert_not_called()
+
+    # ── 미리보기에서 편집한 내용이 카드 썸네일에도 반영 ────────
+    def test_preview_change_regenerates_thumbnail_with_annots(self):
+        ot = self._new_tab_with_pdf()
+        original_bytes = ot.pages[0]["pil"].tobytes()
+        ot.pages[0]["annots"].append({
+            "id": 9999, "type": "rect",
+            "x0": pt.mm_to_pt(10), "y0": pt.mm_to_pt(10),
+            "x1": pt.mm_to_pt(60), "y1": pt.mm_to_pt(60),
+            "line_color": "#FF0000", "line_width": 3.0,
+            "fill_color": "#FFFFFF", "fill_enabled": True,
+        })
+        ot._on_preview_change()
+        self.assertNotEqual(ot.pages[0]["pil"].tobytes(), original_bytes,
+            "annot 을 추가한 뒤 썸네일을 다시 만들었으면 픽셀이 달라져야 함")
+
+    def test_open_preview_wires_on_change_to_thumbnail_refresh(self):
+        ot = self._new_tab_with_pdf()
+        with patch.object(pt, "PreviewWin") as MockPreview:
+            ot._open_preview(0)
+        kwargs = MockPreview.call_args[1]
+        self.assertEqual(kwargs["on_change"], ot._on_preview_change)
+
 
 # ══════════════════════════════════════════════════════════
 #  3. PreviewWin — Phase 3 텍스트 기본 기능 (생성/표시/선택/이동/삭제)
@@ -1111,6 +1160,40 @@ class TestUsabilityImprovements(unittest.TestCase):
         self.assertAlmostEqual(actual[0], expect[0], places=2)
         self.assertAlmostEqual(actual[1], expect[1], places=2)
 
+    # ── 빈 캔버스를 드래그하는 팬(화면 이동)도 재렌더링 없이 동작해야 함 ──
+    def test_panning_empty_canvas_does_not_trigger_full_page_rerender(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        pw._set_tool("select")
+        pw._select_annot(None)   # 아무것도 선택 안 된 상태에서 빈 곳을 드래그
+
+        show_calls = []
+        orig_show = pt.PreviewWin._show
+        def counting_show(self):
+            show_calls.append(1)
+            return orig_show(self)
+        start_x, start_y = 50, 50
+        end_x, end_y = 90, 80
+        with patch.object(pt.PreviewWin, "_show", counting_show):
+            photo_before = pw.photo
+            cx_before, cy_before = pw._cx, pw._cy
+            # annot 이 없는 빈 좌표를 클릭해서 팬을 시작
+            pw._on_canvas_press(FakeEvent(x=start_x, y=start_y))
+            for i in range(1, 11):
+                pw._on_canvas_motion(FakeEvent(
+                    x=start_x + (end_x-start_x)*i//10,
+                    y=start_y + (end_y-start_y)*i//10))
+            pw._on_canvas_release(FakeEvent(x=end_x, y=end_y))
+
+        self.assertEqual(show_calls, [],
+            "빈 캔버스를 드래그(팬)할 때도 페이지를 다시 렌더링하면 안 됨 — 깜빡임의 원인")
+        self.assertIs(pw.photo, photo_before,
+            "팬 중에도 배경 PhotoImage 객체가 재생성되지 않아야 함")
+        # 팬 오프셋만큼 좌표 변환 기준점(_cx/_cy)도 함께 갱신되어야, 팬 이후의
+        # 클릭이 화면에 실제로 보이는 위치와 어긋나지 않는다.
+        self.assertAlmostEqual(pw._cx, cx_before + (end_x-start_x), places=2)
+        self.assertAlmostEqual(pw._cy, cy_before + (end_y-start_y), places=2)
+
     def test_select_and_property_edit_do_not_trigger_full_page_rerender(self):
         pages = self._make_pages()
         pw, annot = self._open_preview_with_text(pages)
@@ -1822,6 +1905,86 @@ class TestShapeAnnots(unittest.TestCase):
         drawings = doc[0].get_drawings()
         self.assertTrue(drawings)
         doc.close()
+
+    # ── 사각형 기본 선 색상 ─────────────────────────────────
+    def test_new_rect_defaults_to_white_border(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (400, 380))
+        a = pages[0]["annots"][0]
+        self.assertEqual(a["line_color"], pt.DEFAULT_RECT_LINE_COLOR)
+        self.assertEqual(a["line_color"], "#FFFFFF")
+
+    # ── 핸들로 크기/끝점 조정 ───────────────────────────────
+    def test_rect_corner_handle_resizes_only_that_corner(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (500, 450))
+        a = pages[0]["annots"][0]
+        x0_before, y0_before = a["x0"], a["y0"]
+
+        sx, sy = pt.pdf_to_screen(a["x1"], a["y1"], pw._cur_pw, pw._cur_ph,
+                                   pw._cur_rot, pw._sc, pw._cx, pw._cy)
+        handle = pw._handle_hit_test(sx, sy)
+        self.assertIsNotNone(handle)
+        self.assertEqual(handle["handle"], "x1y1")
+
+        pw._on_canvas_press(FakeEvent(x=int(sx), y=int(sy)))
+        self.assertIsNotNone(pw._resize_state)
+        pw._on_canvas_motion(FakeEvent(x=int(sx)+40, y=int(sy)+20))
+        pw._on_canvas_release(FakeEvent(x=int(sx)+40, y=int(sy)+20))
+
+        # 반대쪽(x0,y0) 코너는 그대로여야 함
+        self.assertAlmostEqual(a["x0"], x0_before, places=2)
+        self.assertAlmostEqual(a["y0"], y0_before, places=2)
+        self.assertGreater(a["x1"], x0_before)
+        self.assertGreater(a["y1"], y0_before)
+        self.assertIsNone(pw._resize_state)
+
+    def test_rect_handle_crossing_opposite_corner_keeps_normalized(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (400, 400), (600, 550))
+        a = pages[0]["annots"][0]
+
+        sx, sy = pt.pdf_to_screen(a["x0"], a["y0"], pw._cur_pw, pw._cur_ph,
+                                   pw._cur_rot, pw._sc, pw._cx, pw._cy)
+        pw._on_canvas_press(FakeEvent(x=int(sx), y=int(sy)))
+        pw._on_canvas_motion(FakeEvent(x=700, y=650))  # 반대쪽 코너를 넘어서 드래그
+        self.assertLess(a["x0"], a["x1"])
+        self.assertLess(a["y0"], a["y1"])
+        pw._on_canvas_release(FakeEvent(x=700, y=650))
+
+    def test_arrow_endpoint_handle_moves_only_that_end(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "arrow", (300, 300), (500, 400))
+        a = pages[0]["annots"][0]
+        x0_before, y0_before = a["x0"], a["y0"]
+
+        sx1, sy1 = pt.pdf_to_screen(a["x1"], a["y1"], pw._cur_pw, pw._cur_ph,
+                                     pw._cur_rot, pw._sc, pw._cx, pw._cy)
+        handle = pw._handle_hit_test(sx1, sy1)
+        self.assertEqual(handle["handle"], "p1")
+
+        pw._on_canvas_press(FakeEvent(x=int(sx1), y=int(sy1)))
+        pw._on_canvas_motion(FakeEvent(x=int(sx1)+60, y=int(sy1)-30))
+        pw._on_canvas_release(FakeEvent(x=int(sx1)+60, y=int(sy1)-30))
+
+        self.assertAlmostEqual(a["x0"], x0_before, places=2)
+        self.assertAlmostEqual(a["y0"], y0_before, places=2)
+        self.assertNotAlmostEqual(a["x1"], x0_before + (500-300), places=1)
+
+    def test_handles_only_appear_for_selected_shape(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (400, 380))
+        a = pages[0]["annots"][0]
+        sx, sy = pt.pdf_to_screen(a["x1"], a["y1"], pw._cur_pw, pw._cur_ph,
+                                   pw._cur_rot, pw._sc, pw._cx, pw._cy)
+        self.assertIsNotNone(pw._handle_hit_test(sx, sy))
+        pw._select_annot(None)
+        self.assertIsNone(pw._handle_hit_test(sx, sy))
 
 
 if __name__ == "__main__":
