@@ -106,7 +106,7 @@ except ImportError:
 
 try:
     import fitz
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk, ImageOps
     PREVIEW_OK = True
 except ImportError:
     PREVIEW_OK = False
@@ -415,10 +415,18 @@ def _bake_text_annot(page, a, raw_w, raw_h, native_rot, font_cache):
         ascent = size * 0.8
     line_height = size * 1.2
     try:
-        widths = [font.text_length(ln, fontsize=size) for ln in lines]
+        if fontfile:
+            # 실제 폰트 파일을 그대로 삽입/측정 둘 다에 쓰므로 일치한다.
+            widths = [font.text_length(ln, fontsize=size) for ln in lines]
+        else:
+            # "korea"/"helv" 같은 내장 이름은 fitz.Font(fontname=...) 객체로
+            # 잰 길이가 insert_text(fontname=...) 가 실제로 그리는 폭과
+            # 어긋날 수 있다(서로 다른 내부 리소스로 풀림) — 모듈 레벨
+            # get_text_length() 는 insert_text 와 같은 방식으로 풀리므로
+            # 그 쪽을 대신 쓴다.
+            widths = [fitz.get_text_length(ln, fontname=fontname, fontsize=size) for ln in lines]
     except Exception:
         widths = [0.0 for _ in lines]
-    max_w = max(widths) if widths else 0.0
 
     # Tk canvas 의 angle(반시계+)과 통일하려고 부호를 반전했던 것과 동일한
     # 이유로, PyMuPDF Matrix.prerotate() 도 반시계+ 이므로 부호를 반전한다.
@@ -426,9 +434,12 @@ def _bake_text_annot(page, a, raw_w, raw_h, native_rot, font_cache):
     anchor = fitz.Point(x_pt, y_pt)
     mat = fitz.Matrix(1, 1).prerotate(rot) if rot else None
 
+    # 정렬은 X 좌표(x_pt)를 기준선으로 삼아, 각 줄이 그 선에 좌/가운데/
+    # 우측 중 어느 쪽을 맞출지 정한다(줄마다 너비가 달라도 각자 독립적으로
+    # 이 기준선에 맞춰짐 — Canvas 쪽 anchor+justify 조합과 동일한 결과).
     for i, (line, w) in enumerate(zip(lines, widths)):
-        if align == "center": dx = (max_w - w) / 2
-        elif align == "right": dx = max_w - w
+        if align == "center": dx = -w / 2
+        elif align == "right": dx = -w
         else: dx = 0.0
         px, py = x_pt + dx, y_pt + ascent + i * line_height
         kwargs = dict(fontsize=size, color=color, fontname=fontname)
@@ -645,10 +656,13 @@ class TextPropPanel(tk.Frame):
         # ── 색상 ──────────────────────────────────────────
         crow = tk.Frame(self, bg=PANEL); crow.pack(fill="x", padx=14, pady=(0,8))
         tk.Label(crow, text="색상", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(side="left")
-        self.color_btn = tk.Button(crow, text="   ", bg=DEFAULT_ANNOT_COLOR, width=4,
-                                    relief="flat", bd=0, highlightthickness=2, highlightbackground=TEXT_DIM,
-                                    cursor="hand2", command=self._pick_color)
-        self.color_btn.pack(side="left", padx=8)
+        # 색이 흰색 등 패널 배경과 비슷할 때도 클릭 가능한 버튼임을 알 수
+        # 있도록, 살짝 다른 색(TOOLBAR)의 칩 안에 스와치를 넣는다.
+        color_chip = tk.Frame(crow, bg=TOOLBAR, padx=3, pady=3)
+        color_chip.pack(side="left", padx=8)
+        self.color_btn = tk.Button(color_chip, text="   ", bg=DEFAULT_ANNOT_COLOR, width=4,
+                                    relief="flat", bd=0, cursor="hand2", command=self._pick_color)
+        self.color_btn.pack()
 
         # ── 굵게 / 기울임 ─────────────────────────────────
         birow = tk.Frame(self, bg=PANEL); birow.pack(fill="x", padx=10, pady=(0,8))
@@ -896,10 +910,13 @@ class ShapePropPanel(tk.Frame):
         tk.Label(self.line_frame, text="선", font=FONT_S, bg=PANEL, fg=TEXT_DIM)\
             .pack(anchor="w", padx=14)
         lrow = tk.Frame(self.line_frame, bg=PANEL); lrow.pack(fill="x", padx=14, pady=(2,8))
-        self.line_color_btn = tk.Button(lrow, text="   ", bg=DEFAULT_SHAPE_LINE_COLOR, width=4,
-                                         relief="flat", bd=0, highlightthickness=2, highlightbackground=TEXT_DIM,
-                                         cursor="hand2", command=self._pick_line_color)
-        self.line_color_btn.pack(side="left")
+        # 선 색이 흰색 등 패널 배경과 비슷할 때도 클릭 가능한 버튼임을 알
+        # 수 있도록, 살짝 다른 색(TOOLBAR)의 칩 안에 스와치를 넣는다.
+        line_chip = tk.Frame(lrow, bg=TOOLBAR, padx=3, pady=3)
+        line_chip.pack(side="left")
+        self.line_color_btn = tk.Button(line_chip, text="   ", bg=DEFAULT_SHAPE_LINE_COLOR, width=4,
+                                         relief="flat", bd=0, cursor="hand2", command=self._pick_line_color)
+        self.line_color_btn.pack()
         self.line_width_var = tk.StringVar()
         e_lw = tk.Entry(lrow, textvariable=self.line_width_var, font=FONT, width=5, bg="white", fg=TEXT)
         e_lw.pack(side="left", padx=(8,2))
@@ -914,19 +931,21 @@ class ShapePropPanel(tk.Frame):
         tk.Checkbutton(frow, text="채움", variable=self.fill_enabled_var, command=self._apply_fill_enabled,
                        bg=PANEL, fg=TEXT, selectcolor=ACCENT, activebackground=PANEL,
                        font=FONT_S, bd=0, highlightthickness=0).pack(side="left", padx=4)
-        self.fill_color_btn = tk.Button(frow, text="   ", bg=DEFAULT_SHAPE_FILL_COLOR, width=4,
-                                         relief="flat", bd=0, highlightthickness=2, highlightbackground=TEXT_DIM,
-                                         cursor="hand2", command=self._pick_fill_color)
-        self.fill_color_btn.pack(side="left", padx=8)
+        fill_chip = tk.Frame(frow, bg=TOOLBAR, padx=3, pady=3)
+        fill_chip.pack(side="left", padx=8)
+        self.fill_color_btn = tk.Button(fill_chip, text="   ", bg=DEFAULT_SHAPE_FILL_COLOR, width=4,
+                                         relief="flat", bd=0, cursor="hand2", command=self._pick_fill_color)
+        self.fill_color_btn.pack()
 
         # ── 강조 색상 (강조 전용) ───────────────────────────
         self.highlight_frame = tk.Frame(self, bg=PANEL)
         hrow = tk.Frame(self.highlight_frame, bg=PANEL); hrow.pack(fill="x", padx=14, pady=(0,8))
         tk.Label(hrow, text="강조 색상", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(side="left")
-        self.highlight_color_btn = tk.Button(hrow, text="   ", bg=DEFAULT_HIGHLIGHT_COLOR, width=4,
-                                              relief="flat", bd=0, highlightthickness=2, highlightbackground=TEXT_DIM,
-                                              cursor="hand2", command=self._pick_highlight_color)
-        self.highlight_color_btn.pack(side="left", padx=8)
+        highlight_chip = tk.Frame(hrow, bg=TOOLBAR, padx=3, pady=3)
+        highlight_chip.pack(side="left", padx=8)
+        self.highlight_color_btn = tk.Button(highlight_chip, text="   ", bg=DEFAULT_HIGHLIGHT_COLOR, width=4,
+                                              relief="flat", bd=0, cursor="hand2", command=self._pick_highlight_color)
+        self.highlight_color_btn.pack()
 
         # ── 삭제 ────────────────────────────────────────────
         self._delete_sep = tk.Frame(self, bg=BORDER, height=1)
@@ -1079,6 +1098,7 @@ class PreviewWin(tk.Toplevel):
         self._move_state = None      # 드래그로 이동 중인 annot 정보
         self._shape_draft = None     # 드래그로 도형을 새로 그리는 중인 상태(미리보기용)
         self._resize_state = None    # 핸들을 드래그해 도형 크기/끝점을 조정 중인 상태
+        self._clipboard_annot = None # Ctrl+C 로 복사해둔 annot (텍스트/도형 공통)
         # 마지막 _show() 렌더링 기준 좌표 변환 파라미터 (screen<->pdf 변환용)
         self._sc      = None
         self._cx       = None
@@ -1130,6 +1150,12 @@ class PreviewWin(tk.Toplevel):
         self.bind("<minus>",      lambda e: None if self._focus_in_entry() else self._zoom(1/1.25))
         self.bind("<0>",          lambda e: None if self._focus_in_entry() else self._zoom_reset())
         self.bind("<Delete>",     lambda e: None if self._focus_in_entry() else self._delete_selected_annot())
+        # Ctrl+C/V 로 선택된 텍스트/도형을 복사·붙여넣기 (같은 좌표/크기/
+        # 속성 그대로 복제 — 위치는 속성 패널에서 직접 옮기면 됨).
+        self.bind("<Control-c>",  lambda e: None if self._focus_in_entry() else self._copy_selected_annot())
+        self.bind("<Control-C>",  lambda e: None if self._focus_in_entry() else self._copy_selected_annot())
+        self.bind("<Control-v>",  lambda e: None if self._focus_in_entry() else self._paste_annot())
+        self.bind("<Control-V>",  lambda e: None if self._focus_in_entry() else self._paste_annot())
 
     def _build(self):
         # ── 상단 타이틀 바 ───────────────────────────────
@@ -1716,6 +1742,27 @@ class PreviewWin(tk.Toplevel):
         self._redraw_annots()
         if self.on_change: self.on_change()
 
+    def _copy_selected_annot(self, e=None):
+        """선택된 텍스트/도형을 내부 클립보드에 복사한다(다른 페이지로
+        이동해서 붙여넣기도 가능)."""
+        if self.selected_id is None: return
+        a = self._find_annot(self.selected_id)
+        if a is not None:
+            self._clipboard_annot = dict(a)
+
+    def _paste_annot(self, e=None):
+        """복사해둔 텍스트/도형을 같은 좌표·크기·속성 그대로 현재
+        페이지에 붙여넣는다(위치 자체는 필요하면 속성 패널에서 옮기면
+        됨). 위치를 살짝 어긋나게 하지 않고 원본과 정확히 같은 자리에
+        둔다."""
+        if self._clipboard_annot is None: return
+        pg = self.pages[self.idx]
+        new_annot = dict(self._clipboard_annot)
+        new_annot["id"] = next(_id_gen)
+        pg.setdefault("annots", []).append(new_annot)
+        self._select_annot(new_annot["id"])
+        if self.on_change: self.on_change()
+
     def _draw_annots(self, pg):
         for a in pg.get("annots", []):
             t = a.get("type")
@@ -1743,9 +1790,16 @@ class PreviewWin(tk.Toplevel):
         # 반시계방향(+)이라, 이 프로그램의 페이지 회전 규약(시계방향 +)과
         # 표시 방향을 통일하기 위해 부호를 반전해서 넘긴다.
         angle = (-a.get("rotation", 0.0)) % 360
+        # 정렬(align)은 X 좌표를 기준선으로 해서 텍스트가 좌/가운데/우측 중
+        # 어느 쪽을 그 선에 맞출지 결정한다 — anchor 를 그에 맞게 바꾸고
+        # justify 를 같이 쓰면, 여러 줄일 때도 각 줄이 (너비가 달라도) 이
+        # 기준선에 맞춰 정렬된다(anchor 로 정한 기준점이 가장 넓은 줄
+        # 기준으로 잡히고, justify 가 그 안에서 각 줄을 맞추기 때문에
+        # 결과적으로 모든 줄이 X 기준선에 정렬됨).
+        anchor = {"left": "nw", "center": "n", "right": "ne"}.get(a.get("align", "left"), "nw")
         try:
             item = self.canvas.create_text(
-                px, py, text=a.get("text", ""), anchor="nw",
+                px, py, text=a.get("text", ""), anchor=anchor,
                 font=font_spec, fill=a.get("color", DEFAULT_ANNOT_COLOR),
                 justify=a.get("align", "left"), angle=angle,
                 tags=(f"annot_{a['id']}", "annot"))
@@ -2348,20 +2402,29 @@ class OrganizeTab(tk.Frame):
             messagebox.showerror("오류", "이미지 불러오기에는 pymupdf(fitz)가 필요합니다.")
             return None
         try:
-            # fitz.open(image).rect 는 이미지에 DPI 메타데이터가 없으면
-            # 96dpi 로 가정해 이미 pt 로 변환된 값을 주기 때문에(원본 px
-            # 수가 아님), 실제 픽셀 수는 Pixmap 으로 직접 읽는다.
-            src_pix = fitz.Pixmap(img_path)
-            px_w, px_h = src_pix.width, src_pix.height
+            # 휴대폰 사진 등은 실제 픽셀은 그대로 두고 EXIF Orientation
+            # 태그로만 "보여줄 때 이렇게 돌려라" 라고 표시하는 경우가
+            # 많다. fitz.insert_image() 는 이 태그를 무시하고 원본 픽셀을
+            # 그대로 삽입해버려서 사진이 옆으로 눕는 문제가 있었다 — PIL로
+            # 열어 exif_transpose() 로 방향을 실제 픽셀에 반영한 뒤 그
+            # 보정된 이미지를 페이지에 넣는다.
+            pil_img = Image.open(img_path)
+            pil_img = ImageOps.exif_transpose(pil_img)
+            if pil_img.mode not in ("RGB", "L"):
+                pil_img = pil_img.convert("RGB")
+            px_w, px_h = pil_img.size
             target_dpi = 150.0
             pt_w, pt_h = px_w/target_dpi*72.0, px_h/target_dpi*72.0
 
-            doc = fitz.open()
-            page = doc.new_page(width=pt_w, height=pt_h)
-            page.insert_image(fitz.Rect(0, 0, pt_w, pt_h), filename=img_path)
-
             tmp_dir = tempfile.mkdtemp(prefix="pdftool_img_")
             base = os.path.splitext(os.path.basename(img_path))[0]
+            corrected_path = os.path.join(tmp_dir, f"_src_{base}.png")
+            pil_img.save(corrected_path)
+
+            doc = fitz.open()
+            page = doc.new_page(width=pt_w, height=pt_h)
+            page.insert_image(fitz.Rect(0, 0, pt_w, pt_h), filename=corrected_path)
+
             tmp_path = os.path.join(tmp_dir, f"{base}.pdf")
             doc.save(tmp_path)
             doc.close()
@@ -2373,7 +2436,9 @@ class OrganizeTab(tk.Frame):
     def _load_pdfs(self, paths):
         for path in paths:
             try:
+                src_image_ext = None
                 if path.lower().endswith(self.IMG_EXTS):
+                    src_image_ext = os.path.splitext(path)[1].lower()
                     converted = self._image_to_temp_pdf(path)
                     if converted is None: continue
                     path = converted
@@ -2393,7 +2458,7 @@ class OrganizeTab(tk.Frame):
                     self.pages.append({"id":next(_id_gen),"src":path,
                                        "pidx":pidx,"pil":pil,"rot":0,
                                        "page_w_pt":pw_pt,"page_h_pt":ph_pt,
-                                       "annots":[]})
+                                       "annots":[], "src_image_ext":src_image_ext})
                 if fdoc is not None: fdoc.close()
             except Exception as e:
                 messagebox.showerror("오류",f"{os.path.basename(path)}\n{e}")
@@ -2423,10 +2488,23 @@ class OrganizeTab(tk.Frame):
         if not self.pages:
             messagebox.showwarning("경고","페이지가 없습니다."); return
         init_dir = os.path.dirname(self.pages[0]["src"]) if self.pages else ""
+
+        # 사진 한 장만 불러와서 작업한 경우, 저장 형식도 그 사진과 같은
+        # 걸(jpg/png) 기본값으로 제안한다 — PDF만 고집할 이유가 없어서.
+        default_ext = ".pdf"
+        if len(self.pages) == 1:
+            img_ext = self.pages[0].get("src_image_ext")
+            if img_ext in (".jpg", ".jpeg"):
+                default_ext = ".jpg"
+            elif img_ext == ".png":
+                default_ext = ".png"
+        filetypes = [("PDF","*.pdf"), ("JPG 이미지","*.jpg"), ("PNG 이미지","*.png")]
+        default_label = {".pdf":"PDF", ".jpg":"JPG 이미지", ".png":"PNG 이미지"}[default_ext]
+        filetypes.sort(key=lambda ft: ft[0] != default_label)   # 기본 형식을 맨 앞으로
+
         out = filedialog.asksaveasfilename(title="저장",
-            defaultextension=".pdf",
-            filetypes=[("PDF","*.pdf"), ("JPG 이미지","*.jpg"), ("PNG 이미지","*.png")],
-            initialdir=init_dir, initialfile="output.pdf")
+            defaultextension=default_ext, filetypes=filetypes,
+            initialdir=init_dir, initialfile=f"output{default_ext}")
         if not out: return
         ext = os.path.splitext(out)[1].lower()
         try:

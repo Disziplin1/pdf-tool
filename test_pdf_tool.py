@@ -678,19 +678,23 @@ class TestPropertyPanel(unittest.TestCase):
         panel._apply_font()
         self.assertEqual(annot["font"], other)
 
-    # ── 좌측 상단 기준 불변 (정렬 옵션이 X/Y 의 의미를 바꾸면 안 됨) ──
-    def test_anchor_stays_top_left_regardless_of_align(self):
+    # ── 정렬을 바꿔도 저장된 X/Y 좌표 자체는 그대로(기준선 역할) ──
+    def test_xy_unchanged_but_anchor_follows_align(self):
+        """정렬(좌/가운데/우측)은 annot 에 저장된 X 좌표를 바꾸지 않는다
+        — 대신 그 X 를 기준선으로 삼아 텍스트가 어느 쪽을 그 선에 맞출지
+        (anchor) 만 바뀐다."""
         pages = self._make_pages()
         pw, annot = self._open_preview_with_text(pages)
         x_before, y_before = annot["x"], annot["y"]
         panel = pw.prop_panel
+        expect_anchor = {"좌측": "nw", "가운데": "n", "우측": "ne"}
         for label in ("좌측", "가운데", "우측"):
             panel.align_var.set(label)
             panel._apply_align()
             self.assertEqual(annot["x"], x_before)
             self.assertEqual(annot["y"], y_before)
             items = pw.canvas.find_withtag(f"annot_{annot['id']}")
-            self.assertEqual(pw.canvas.itemcget(items[0], "anchor"), "nw")
+            self.assertEqual(pw.canvas.itemcget(items[0], "anchor"), expect_anchor[label])
 
     # ── 페이지 복제 시 새 필드도 독립적으로 복사되는지 ─────────
     def test_duplicate_page_copies_new_fields_independently(self):
@@ -764,8 +768,10 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         self.addCleanup(pw.destroy)
         return pw
 
-    # ── 1. X/Y 는 항상 텍스트 좌측 상단 기준 (정렬 무관) ───────
+    # ── 1. 정렬을 바꿔도 저장된 X/Y 좌표 자체는 그대로(기준선 역할) ──
     def test_xy_anchor_unaffected_by_alignment(self):
+        """정렬은 저장된 X 좌표를 바꾸지 않는다 — 그 X 를 기준선 삼아
+        텍스트가 좌/가운데/우측 중 어느 쪽을 맞출지(anchor)만 바뀐다."""
         pages = self._load(self.pdf_path_a4)
         pw = self._open(pages)
         pw._toggle_edit(); pw._set_tool("text")
@@ -773,12 +779,13 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         annot = pages[0]["annots"][0]
         x0, y0 = annot["x"], annot["y"]
         panel = pw.prop_panel
+        expect_anchor = {"좌측": "nw", "가운데": "n", "우측": "ne"}
         for label in ("좌측", "가운데", "우측"):
             panel.align_var.set(label); panel._apply_align()
             self.assertEqual(annot["x"], x0)
             self.assertEqual(annot["y"], y0)
             items = pw.canvas.find_withtag(f"annot_{annot['id']}")
-            self.assertEqual(pw.canvas.itemcget(items[0], "anchor"), "nw")
+            self.assertEqual(pw.canvas.itemcget(items[0], "anchor"), expect_anchor[label])
 
     # ── 2/3. 페이지 회전 vs 텍스트 회전 완전 분리 + 0/90/180/270 실측 ──
     def test_page_and_text_rotation_are_fully_independent_all_angles(self):
@@ -1512,6 +1519,40 @@ class TestExportBakesTextAnnots(unittest.TestCase):
         self.assertAlmostEqual(bbox.x0, x_pt, delta=2.0)
         self.assertAlmostEqual(bbox.y0, y_pt, delta=6.0)
 
+    def test_exported_text_alignment_shifts_relative_to_x(self):
+        """정렬(좌/가운데/우측)은 X 좌표를 기준선으로 삼아 텍스트를
+        움직여야 한다 — 한 줄짜리 텍스트에서도 실제로 효과가 있어야 함
+        (여러 줄일 때 줄간 정렬에만 영향을 주던 이전 동작의 회귀 테스트)."""
+        ot, pages = self._make_pages()
+        x_pt, y_pt = pt.mm_to_pt(100), pt.mm_to_pt(50)
+        results = {}
+        for align in ("left", "center", "right"):
+            pages[0]["annots"] = [{
+                "id": 9010, "type": "text", "text": "ALIGN",
+                "x": x_pt, "y": y_pt,
+                "font": pt.DEFAULT_ANNOT_FONT, "font_size": 24.0,
+                "color": "#000000", "bold": False, "italic": False,
+                "align": align, "rotation": 0.0,
+            }]
+            out = os.path.join(self.tmpdir, f"out_align_{align}.pdf")
+            self._export(ot, out)
+            doc = fitz.open(out)
+            rects = doc[0].search_for("ALIGN")
+            doc.close()
+            self.assertTrue(rects)
+            results[align] = rects[0]
+
+        # 좌측 정렬: 텍스트 왼쪽 끝이 X 좌표 근처
+        self.assertAlmostEqual(results["left"].x0, x_pt, delta=2.0)
+        # 우측 정렬: 텍스트 오른쪽 끝이 X 좌표 근처
+        self.assertAlmostEqual(results["right"].x1, x_pt, delta=2.0)
+        # 가운데 정렬: 텍스트 중심이 X 좌표 근처
+        center_x = (results["center"].x0 + results["center"].x1) / 2
+        self.assertAlmostEqual(center_x, x_pt, delta=2.0)
+        # 세 정렬의 왼쪽 끝 위치는 서로 달라야 함(실제로 움직였다는 증거)
+        self.assertNotAlmostEqual(results["left"].x0, results["center"].x0, delta=1.0)
+        self.assertNotAlmostEqual(results["left"].x0, results["right"].x0, delta=1.0)
+
     def test_exported_text_color_is_applied(self):
         ot, pages = self._make_pages()
         pages[0]["annots"].append({
@@ -2141,6 +2182,231 @@ class TestImageImportAndExport(unittest.TestCase):
         text = doc[0].get_text()
         doc.close()
         self.assertIn("이미지 위 텍스트", text)
+
+    # ── EXIF Orientation 보정 ────────────────────────────────
+    def test_exif_rotated_photo_loads_upright(self):
+        """휴대폰 사진처럼 실제 픽셀은 가로(landscape)인데 EXIF
+        Orientation 태그로 세로로 보이게 지정된 경우, 그 태그를 무시하고
+        가로 그대로 불러오면 사진이 옆으로 눕는다 — 태그를 반영해 세로
+        페이지로 들어와야 한다."""
+        from PIL import Image as PILImage
+        path = os.path.join(self.tmpdir, "exif_landscape.jpg")
+        img = PILImage.new("RGB", (800, 400), (255, 255, 255))
+        exif = img.getexif()
+        exif[0x0112] = 6   # Orientation 6: 90도 시계방향으로 회전해야 올바름
+        img.save(path, exif=exif)
+
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([path])
+        pg = ot.pages[0]
+        # EXIF 보정을 반영하면 800x400(가로) 원본 픽셀이 400x800(세로)로
+        # 바뀌어야 하므로, 페이지도 너비<높이(세로)가 되어야 한다.
+        self.assertLess(pg["page_w_pt"], pg["page_h_pt"])
+
+    def test_photo_without_exif_is_unaffected(self):
+        """EXIF 태그가 없는 일반 이미지는 그대로(가로는 가로로) 들어와야
+        한다 — 보정 로직이 방향 정보가 없을 때 엉뚱하게 돌리면 안 됨."""
+        img = self._make_image("plain_landscape.png", size=(800, 400))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([img])
+        pg = ot.pages[0]
+        self.assertGreater(pg["page_w_pt"], pg["page_h_pt"])
+
+    # ── 내보내기 기본 형식이 불러온 사진 형식을 따라가는지 ─────
+    def test_export_dialog_defaults_to_jpg_for_single_jpg_photo(self):
+        img = self._make_image("photo.jpg")
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([img])
+        with patch.object(pt.filedialog, "asksaveasfilename", return_value="") as mock_dialog:
+            ot._export()
+        kwargs = mock_dialog.call_args[1]
+        self.assertEqual(kwargs["defaultextension"], ".jpg")
+        self.assertEqual(kwargs["initialfile"], "output.jpg")
+
+    def test_export_dialog_defaults_to_png_for_single_png_photo(self):
+        img = self._make_image("photo.png")
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([img])
+        with patch.object(pt.filedialog, "asksaveasfilename", return_value="") as mock_dialog:
+            ot._export()
+        kwargs = mock_dialog.call_args[1]
+        self.assertEqual(kwargs["defaultextension"], ".png")
+        self.assertEqual(kwargs["initialfile"], "output.png")
+
+    def test_export_dialog_still_defaults_to_pdf_for_normal_pdf(self):
+        pdf_path = os.path.join(self.tmpdir, "regular.pdf")
+        make_pdf(pdf_path, sizes=((595.28, 841.89),))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([pdf_path])
+        with patch.object(pt.filedialog, "asksaveasfilename", return_value="") as mock_dialog:
+            ot._export()
+        kwargs = mock_dialog.call_args[1]
+        self.assertEqual(kwargs["defaultextension"], ".pdf")
+
+    def test_export_dialog_defaults_to_pdf_when_multiple_pages(self):
+        """사진이어도 여러 페이지가 섞여 있으면(예: PDF와 같이 사용) 굳이
+        이미지 형식을 기본값으로 강제하지 않고 PDF로 유지한다."""
+        img = self._make_image("photo2.jpg")
+        pdf_path = os.path.join(self.tmpdir, "another.pdf")
+        make_pdf(pdf_path, sizes=((595.28, 841.89),))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([img, pdf_path])
+        self.assertEqual(len(ot.pages), 2)
+        with patch.object(pt.filedialog, "asksaveasfilename", return_value="") as mock_dialog:
+            ot._export()
+        kwargs = mock_dialog.call_args[1]
+        self.assertEqual(kwargs["defaultextension"], ".pdf")
+
+
+# ══════════════════════════════════════════════════════════
+#  9. 텍스트/도형 복사·붙여넣기 (Ctrl+C / Ctrl+V)
+# ══════════════════════════════════════════════════════════
+class TestCopyPasteAnnots(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pt.TkinterDnD.Tk() if pt.DND_OK else pt.tk.Tk()
+        cls.root.withdraw()
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_copypaste_test_")
+        cls.pdf_path = os.path.join(cls.tmpdir, "sample.pdf")
+        make_pdf(cls.pdf_path, sizes=((595.28, 841.89), (595.28, 841.89)))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _make_pages(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        return ot.pages
+
+    def _open_preview(self, pages, start=0):
+        pw = pt.PreviewWin(self.root, pages, start)
+        pw.update_idletasks(); pw.geometry("1150x820+0+0"); pw.update(); pw._show()
+        self.addCleanup(pw.destroy)
+        pw._toggle_edit()
+        return pw
+
+    def _drag_create(self, pw, tool, p0, p1):
+        pw._set_tool(tool)
+        pw._on_canvas_press(FakeEvent(x=p0[0], y=p0[1]))
+        pw._on_canvas_motion(FakeEvent(x=p1[0], y=p1[1]))
+        pw._on_canvas_release(FakeEvent(x=p1[0], y=p1[1]))
+
+    def test_copy_paste_text_creates_identical_copy_at_same_position(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        orig = pages[0]["annots"][0]
+        orig["text"] = "복사할 텍스트"
+        orig["font_size"] = 22.0
+        orig["color"] = "#0000FF"
+        orig["align"] = "center"
+        pw._select_annot(orig["id"])
+
+        pw._copy_selected_annot()
+        pw._paste_annot()
+
+        self.assertEqual(len(pages[0]["annots"]), 2)
+        pasted = pages[0]["annots"][1]
+        self.assertNotEqual(pasted["id"], orig["id"])
+        self.assertEqual(pasted["x"], orig["x"])
+        self.assertEqual(pasted["y"], orig["y"])
+        self.assertEqual(pasted["text"], orig["text"])
+        self.assertEqual(pasted["font_size"], orig["font_size"])
+        self.assertEqual(pasted["color"], orig["color"])
+        self.assertEqual(pasted["align"], orig["align"])
+        self.assertEqual(pw.selected_id, pasted["id"])   # 붙여넣은 게 바로 선택됨
+
+    def test_copy_paste_rect_preserves_size_and_style(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (450, 400))
+        orig = pages[0]["annots"][0]
+        orig["line_color"] = "#00FF00"
+        orig["fill_enabled"] = True
+        orig["fill_color"] = "#123456"
+        pw._select_annot(orig["id"])
+
+        pw._copy_selected_annot()
+        pw._paste_annot()
+
+        pasted = pages[0]["annots"][1]
+        self.assertEqual(pasted["x0"], orig["x0"]); self.assertEqual(pasted["y0"], orig["y0"])
+        self.assertEqual(pasted["x1"], orig["x1"]); self.assertEqual(pasted["y1"], orig["y1"])
+        self.assertEqual(pasted["line_color"], orig["line_color"])
+        self.assertEqual(pasted["fill_enabled"], orig["fill_enabled"])
+        self.assertEqual(pasted["fill_color"], orig["fill_color"])
+
+    def test_paste_creates_independent_copy_not_shared_reference(self):
+        """붙여넣은 뒤 원본을 수정해도 복사본은 영향받으면 안 된다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        orig = pages[0]["annots"][0]
+        pw._select_annot(orig["id"])
+        pw._copy_selected_annot()
+        pw._paste_annot()
+        pasted = pages[0]["annots"][1]
+
+        orig["text"] = "원본만 바뀜"
+        self.assertNotEqual(pasted["text"], "원본만 바뀜")
+
+    def test_paste_without_prior_copy_does_nothing(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self.assertIsNone(pw._clipboard_annot)
+        pw._paste_annot()   # 예외 없이 조용히 무시되어야 함
+        self.assertEqual(pages[0]["annots"], [])
+
+    def test_copy_with_nothing_selected_does_nothing(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._select_annot(None)
+        pw._copy_selected_annot()
+        self.assertIsNone(pw._clipboard_annot)
+
+    def test_paste_onto_different_page_works(self):
+        """복사한 뒤 다른 페이지로 이동해서 붙여넣어도 그 페이지에
+        생성되어야 한다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        orig = pages[0]["annots"][0]
+        pw._select_annot(orig["id"])
+        pw._copy_selected_annot()
+
+        pw._go(1)
+        self.assertEqual(pw.idx, 1)
+        pw._paste_annot()
+
+        self.assertEqual(len(pages[0]["annots"]), 1)   # 원본 페이지는 그대로
+        self.assertEqual(len(pages[1]["annots"]), 1)   # 새 페이지에 붙여넣어짐
+        self.assertEqual(pages[1]["annots"][0]["text"], orig["text"])
+
+    def test_copy_paste_shortcuts_are_guarded_by_entry_focus_check(self):
+        """속성 패널 입력창에 포커스가 있을 때는 Ctrl+C/V 가 도형 복사가
+        아니라 그 입력창의 기본 동작(텍스트 복사/붙여넣기)으로 남아야
+        한다 — Delete/방향키와 동일한 _focus_in_entry() 가드 패턴을 그대로
+        재사용하는지 확인."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (450, 400))
+        entry = pt.tk.Entry(pw)
+        self.addCleanup(entry.destroy)
+        with patch.object(pw, "focus_get", return_value=entry):
+            self.assertTrue(pw._focus_in_entry(),
+                "입력창에 포커스가 있으면 _focus_in_entry() 가 True 여야 Ctrl+C/V 단축키가 가로채지 않음")
 
 
 if __name__ == "__main__":
