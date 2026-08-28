@@ -646,7 +646,8 @@ class TextPropPanel(tk.Frame):
         crow = tk.Frame(self, bg=PANEL); crow.pack(fill="x", padx=14, pady=(0,8))
         tk.Label(crow, text="색상", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(side="left")
         self.color_btn = tk.Button(crow, text="   ", bg=DEFAULT_ANNOT_COLOR, width=4,
-                                    relief="flat", bd=1, cursor="hand2", command=self._pick_color)
+                                    relief="flat", bd=0, highlightthickness=2, highlightbackground=TEXT_DIM,
+                                    cursor="hand2", command=self._pick_color)
         self.color_btn.pack(side="left", padx=8)
 
         # ── 굵게 / 기울임 ─────────────────────────────────
@@ -896,7 +897,8 @@ class ShapePropPanel(tk.Frame):
             .pack(anchor="w", padx=14)
         lrow = tk.Frame(self.line_frame, bg=PANEL); lrow.pack(fill="x", padx=14, pady=(2,8))
         self.line_color_btn = tk.Button(lrow, text="   ", bg=DEFAULT_SHAPE_LINE_COLOR, width=4,
-                                         relief="flat", bd=1, cursor="hand2", command=self._pick_line_color)
+                                         relief="flat", bd=0, highlightthickness=2, highlightbackground=TEXT_DIM,
+                                         cursor="hand2", command=self._pick_line_color)
         self.line_color_btn.pack(side="left")
         self.line_width_var = tk.StringVar()
         e_lw = tk.Entry(lrow, textvariable=self.line_width_var, font=FONT, width=5, bg="white", fg=TEXT)
@@ -913,7 +915,8 @@ class ShapePropPanel(tk.Frame):
                        bg=PANEL, fg=TEXT, selectcolor=ACCENT, activebackground=PANEL,
                        font=FONT_S, bd=0, highlightthickness=0).pack(side="left", padx=4)
         self.fill_color_btn = tk.Button(frow, text="   ", bg=DEFAULT_SHAPE_FILL_COLOR, width=4,
-                                         relief="flat", bd=1, cursor="hand2", command=self._pick_fill_color)
+                                         relief="flat", bd=0, highlightthickness=2, highlightbackground=TEXT_DIM,
+                                         cursor="hand2", command=self._pick_fill_color)
         self.fill_color_btn.pack(side="left", padx=8)
 
         # ── 강조 색상 (강조 전용) ───────────────────────────
@@ -921,7 +924,8 @@ class ShapePropPanel(tk.Frame):
         hrow = tk.Frame(self.highlight_frame, bg=PANEL); hrow.pack(fill="x", padx=14, pady=(0,8))
         tk.Label(hrow, text="강조 색상", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(side="left")
         self.highlight_color_btn = tk.Button(hrow, text="   ", bg=DEFAULT_HIGHLIGHT_COLOR, width=4,
-                                              relief="flat", bd=1, cursor="hand2", command=self._pick_highlight_color)
+                                              relief="flat", bd=0, highlightthickness=2, highlightbackground=TEXT_DIM,
+                                              cursor="hand2", command=self._pick_highlight_color)
         self.highlight_color_btn.pack(side="left", padx=8)
 
         # ── 삭제 ────────────────────────────────────────────
@@ -1898,7 +1902,7 @@ class OrganizeTab(tk.Frame):
               fg=TEXT, py=6).pack(side="left", padx=(6,4))
 
         # ── 내보내기 (오른쪽, 가장 중요한 동작이라 강조) ──
-        mkbtn(tb, "▶  PDF 내보내기", self._export, bg=ACCENT,
+        mkbtn(tb, "▶  내보내기", self._export, bg=ACCENT,
               px=20, py=11).pack(side="right", padx=(4,12))
         sep_v(tb)
 
