@@ -666,16 +666,24 @@ class TestPropertyPanel(unittest.TestCase):
             mock_warn.assert_called_once()
         self.assertEqual(annot["rotation"], 0.0)
 
-    def test_font_is_fixed_to_korean_capable_font(self):
-        """글꼴 선택 UI는 제거되었고, 한글 지원 폰트로 고정된다
-        (Arial 등 한글 미지원 폰트로 바뀌어 PDF 출력이 깨지는 것을 방지)."""
+    def test_new_text_defaults_to_korean_capable_font(self):
+        """새 텍스트의 기본 글꼴은 한글을 지원하는 폰트여야 한다
+        (Arial 등을 기본값으로 쓰면 한글이 깨질 수 있음)."""
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        self.assertEqual(annot.get("font"), pt.DEFAULT_ANNOT_FONT)
+        self.assertNotEqual(pt.DEFAULT_ANNOT_FONT.lower(), "arial")
+
+    def test_font_selection_applies(self):
         pages = self._make_pages()
         pw, annot = self._open_preview_with_text(pages)
         panel = pw.prop_panel
-        self.assertFalse(hasattr(panel, "font_var"))
-        self.assertFalse(hasattr(panel, "font_combo"))
-        self.assertEqual(annot.get("font"), pt.DEFAULT_ANNOT_FONT)
-        self.assertNotEqual(pt.DEFAULT_ANNOT_FONT.lower(), "arial")
+        fonts = list(panel.font_combo["values"])
+        self.assertTrue(fonts)
+        other = next((f for f in fonts if f != annot.get("font")), fonts[0])
+        panel.font_var.set(other)
+        panel._apply_font()
+        self.assertEqual(annot["font"], other)
 
     def test_align_icon_buttons_highlight_active_selection(self):
         """정렬 아이콘 버튼 중 현재 선택된 것만 강조색(ACCENT) 배경이 되고
@@ -2461,6 +2469,181 @@ class TestCopyPasteAnnots(unittest.TestCase):
         with patch.object(pw, "focus_get", return_value=entry):
             self.assertTrue(pw._focus_in_entry(),
                 "입력창에 포커스가 있으면 _focus_in_entry() 가 True 여야 Ctrl+C/V 단축키가 가로채지 않음")
+
+
+class TestPanToolAndSpacebar(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pt.TkinterDnD.Tk() if pt.DND_OK else pt.tk.Tk()
+        cls.root.withdraw()
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_pan_test_")
+        cls.pdf_path = os.path.join(cls.tmpdir, "sample.pdf")
+        make_pdf(cls.pdf_path, sizes=((595.28, 841.89),))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _make_pages(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        return ot.pages
+
+    def _open_preview(self, pages, start=0):
+        pw = pt.PreviewWin(self.root, pages, start)
+        pw.update_idletasks(); pw.geometry("1150x820+0+0"); pw.update(); pw._show()
+        self.addCleanup(pw.destroy)
+        pw._toggle_edit()
+        return pw
+
+    def _finish_release(self, pw):
+        """스페이스 릴리즈는 자동반복 오탐 방지를 위해 after() 로 지연 처리되므로,
+        테스트에서는 예약된 콜백을 취소하고 즉시 직접 호출해 결정적으로 검증한다."""
+        if pw._space_hold_pending is not None:
+            pw.after_cancel(pw._space_hold_pending)
+        pw._finish_space_release()
+
+    def test_pan_button_toggles_on_and_off(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._toggle_pan_tool()
+        self.assertEqual(pw.tool, "pan")
+        self.assertTrue(pw._pan_active)
+        pw._toggle_pan_tool()
+        self.assertEqual(pw.tool, "text")
+        self.assertFalse(pw._pan_active)
+
+    def test_pan_button_highlighted_when_active(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._toggle_pan_tool()
+        self.assertEqual(str(pw.tool_btns["pan"].cget("bg")), pt.ACCENT)
+        self.assertEqual(str(pw.tool_btns["select"].cget("bg")), pt.TOOLBAR)
+
+    def test_space_hold_temporarily_activates_pan_then_restores_previous_tool(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("rect")
+        pw._on_space_press(None)
+        self.assertEqual(pw.tool, "pan")
+        self.assertTrue(pw._pan_active)
+        pw._on_space_release(None)
+        self._finish_release(pw)
+        self.assertEqual(pw.tool, "rect")
+        self.assertFalse(pw._pan_active)
+
+    def test_space_tap_turns_off_button_toggled_pan(self):
+        """이동 버튼으로 팬을 켜둔 상태에서 스페이스바를 한 번 눌렀다
+        떼면(홀드가 아니어도) 버튼을 다시 누른 것과 동일하게 꺼져야 한다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("select")
+        pw._toggle_pan_tool()
+        self.assertEqual(pw.tool, "pan")
+        pw._on_space_press(None)
+        pw._on_space_release(None)
+        self._finish_release(pw)
+        self.assertEqual(pw.tool, "select")
+        self.assertFalse(pw._pan_active)
+
+    def test_switching_to_another_tool_cancels_pan_state(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._toggle_pan_tool()
+        self.assertTrue(pw._pan_active)
+        pw._set_tool("highlight")
+        self.assertFalse(pw._pan_active)
+        self.assertEqual(pw.tool, "highlight")
+
+    def test_pan_tool_drag_over_text_does_not_select_or_move_it(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot = pages[0]["annots"][0]
+        x0, y0 = annot["x"], annot["y"]
+        pw._set_tool("select")   # 자동 전환된 도구 원복
+        pw._select_annot(None)   # 선택 해제 상태에서 시작
+        pw._toggle_pan_tool()
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._on_canvas_motion(FakeEvent(x=350, y=340))
+        pw._on_canvas_release(FakeEvent(x=350, y=340))
+        self.assertEqual(annot["x"], x0)
+        self.assertEqual(annot["y"], y0)
+        self.assertIsNone(pw.selected_id)
+        self.assertEqual(pw.pan_x, 50)
+        self.assertEqual(pw.pan_y, 40)
+
+
+class TestUnsavedExportExitConfirmation(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pt.TkinterDnD.Tk() if pt.DND_OK else pt.tk.Tk()
+        cls.root.withdraw()
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_exit_test_")
+        cls.pdf_path = os.path.join(cls.tmpdir, "sample.pdf")
+        make_pdf(cls.pdf_path, sizes=((595.28, 841.89),))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _new_tab(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        return ot
+
+    def test_no_pages_means_no_unsaved_changes(self):
+        ot = self._new_tab()
+        self.assertFalse(ot.has_unsaved_changes())
+
+    def test_loading_a_file_marks_unsaved_changes(self):
+        ot = self._new_tab()
+        ot._load_pdfs([self.pdf_path])
+        self.assertTrue(ot.has_unsaved_changes())
+
+    def test_export_clears_unsaved_changes_flag(self):
+        ot = self._new_tab()
+        ot._load_pdfs([self.pdf_path])
+        self.assertTrue(ot.has_unsaved_changes())
+        out_path = os.path.join(self.tmpdir, "out.pdf")
+        with patch.object(pt.filedialog, "asksaveasfilename", return_value=out_path), \
+             patch.object(pt.messagebox, "showinfo"):
+            ot._export()
+        self.assertFalse(ot.has_unsaved_changes())
+
+    def test_editing_after_export_marks_unsaved_again(self):
+        ot = self._new_tab()
+        ot._load_pdfs([self.pdf_path])
+        out_path = os.path.join(self.tmpdir, "out.pdf")
+        with patch.object(pt.filedialog, "asksaveasfilename", return_value=out_path), \
+             patch.object(pt.messagebox, "showinfo"):
+            ot._export()
+        self.assertFalse(ot.has_unsaved_changes())
+        ot._hov_action("rotate", 0)
+        self.assertTrue(ot.has_unsaved_changes())
+
+    def test_annotation_edit_via_preview_marks_unsaved(self):
+        ot = self._new_tab()
+        ot._load_pdfs([self.pdf_path])
+        out_path = os.path.join(self.tmpdir, "out.pdf")
+        with patch.object(pt.filedialog, "asksaveasfilename", return_value=out_path), \
+             patch.object(pt.messagebox, "showinfo"):
+            ot._export()
+        self.assertFalse(ot.has_unsaved_changes())
+        ot._on_preview_change()   # PreviewWin 의 on_change 콜백과 동일한 경로
+        self.assertTrue(ot.has_unsaved_changes())
+
+    def test_cancelled_export_dialog_does_not_clear_dirty_flag(self):
+        ot = self._new_tab()
+        ot._load_pdfs([self.pdf_path])
+        with patch.object(pt.filedialog, "asksaveasfilename", return_value=""):
+            ot._export()
+        self.assertTrue(ot.has_unsaved_changes())
 
 
 if __name__ == "__main__":

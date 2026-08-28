@@ -145,7 +145,7 @@ FONT_XS= (FM, 8)
 # 텍스트 annot 기본값 (Phase 3 에서 만든 annot 에는 이 필드들이 없을 수
 # 있으므로, 항상 .get(key, DEFAULT_*) 형태로 읽어 하위 호환을 유지한다)
 DEFAULT_ANNOT_FONT  = FM
-DEFAULT_ANNOT_SIZE  = 14.0     # pt
+DEFAULT_ANNOT_SIZE  = 50.0     # pt
 DEFAULT_ANNOT_COLOR = "#000000"
 DEFAULT_ANNOT_TEXT  = "텍스트"  # 새 텍스트 생성 시 기본 내용(바로 선택되어 덮어쓰기 가능)
 
@@ -635,6 +635,14 @@ class TextPropPanel(tk.Frame):
         self.page_size_lbl = tk.Label(self, text="", font=FONT_XS, bg=PANEL, fg=TEXT_DIM)
         self.page_size_lbl.pack(anchor="w", padx=14, pady=(2,8))
 
+        # ── 글꼴 ──────────────────────────────────────────
+        tk.Label(self, text="글꼴", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(anchor="w", **pad)
+        self.font_var = tk.StringVar()
+        self.font_combo = ttk.Combobox(self, textvariable=self.font_var, values=self._font_list(),
+                                        state="readonly", font=FONT_S)
+        self.font_combo.pack(fill="x", padx=14, pady=(2,8))
+        self.font_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_font())
+
         # ── 크기 (- [숫자입력] + 스테퍼) ─────────────────────
         tk.Label(self, text="크기 (pt)", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(anchor="w", **pad)
         size_row = tk.Frame(self, bg=PANEL); size_row.pack(fill="x", padx=14, pady=(2,8))
@@ -703,6 +711,14 @@ class TextPropPanel(tk.Frame):
         if self.annot is None: return
         self.owner._delete_selected_annot()
 
+    def _font_list(self):
+        try:
+            from tkinter import font as tkfont
+            names = sorted(set(tkfont.families(self)))
+            return names if names else [DEFAULT_ANNOT_FONT]
+        except Exception:
+            return [DEFAULT_ANNOT_FONT]
+
     # ── 정렬 아이콘 버튼 ──────────────────────────────────
     def _make_align_icon(self, parent, align_key):
         """좌/가운데/우측 정렬 아이콘(막대 3개)을 캔버스에 직접 그려서
@@ -758,6 +774,8 @@ class TextPropPanel(tk.Frame):
         self.text_var.set(annot.get("text", ""))
         self.x_var.set(f"{pt_to_mm(annot['x']):.2f}")
         self.y_var.set(f"{self._y_pt_to_disp_mm(annot['y']):.2f}")
+        font_name = annot.get("font", DEFAULT_ANNOT_FONT)
+        self.font_var.set(font_name if font_name in self.font_combo["values"] else DEFAULT_ANNOT_FONT)
         self.size_var.set(f"{annot.get('font_size', DEFAULT_ANNOT_SIZE):.2f}")
         self.bold_var.set(bool(annot.get("bold", False)))
         self.italic_var.set(bool(annot.get("italic", False)))
@@ -864,6 +882,11 @@ class TextPropPanel(tk.Frame):
         rot = rot % 360
         self.annot["rotation"] = rot
         self.rot_var.set(f"{rot:.1f}")
+        self.owner._on_annot_prop_changed()
+
+    def _apply_font(self):
+        if self.annot is None: return
+        self.annot["font"] = self.font_var.get() or DEFAULT_ANNOT_FONT
         self.owner._on_annot_prop_changed()
 
     def _apply_style(self):
@@ -1118,6 +1141,11 @@ class PreviewWin(tk.Toplevel):
         self._shape_draft = None     # 드래그로 도형을 새로 그리는 중인 상태(미리보기용)
         self._resize_state = None    # 핸들을 드래그해 도형 크기/끝점을 조정 중인 상태
         self._clipboard_annot = None # Ctrl+C 로 복사해둔 annot (텍스트/도형 공통)
+        # ── 이동(팬) 도구 — 버튼 토글 또는 스페이스바로 임시 활성화 ──
+        self._pan_active     = False # 팬 도구가 (버튼/스페이스 무엇으로든) 켜져 있는지
+        self._tool_before_pan = "select"  # 팬을 끌 때 되돌아갈 이전 도구
+        self._space_key_down  = False
+        self._space_hold_pending = None   # 키 반복(auto-repeat)으로 인한 가짜 릴리즈 방지용 after id
         # 마지막 _show() 렌더링 기준 좌표 변환 파라미터 (screen<->pdf 변환용)
         self._sc      = None
         self._cx       = None
@@ -1175,6 +1203,11 @@ class PreviewWin(tk.Toplevel):
         self.bind("<Control-C>",  lambda e: None if self._focus_in_entry() else self._copy_selected_annot())
         self.bind("<Control-v>",  lambda e: None if self._focus_in_entry() else self._paste_annot())
         self.bind("<Control-V>",  lambda e: None if self._focus_in_entry() else self._paste_annot())
+        # 스페이스바: 누르고 있는 동안 임시로 팬(이동) 도구로 전환, 떼면 원래
+        # 도구로 복귀. 이미 팬 버튼으로 켜둔 상태라면 한 번 눌렀다 떼는 것만
+        # 으로 팬을 끈다(버튼을 다시 누르는 것과 동일한 효과).
+        self.bind("<KeyPress-space>",   self._on_space_press)
+        self.bind("<KeyRelease-space>", self._on_space_release)
 
     def _build(self):
         # ── 상단 타이틀 바 ───────────────────────────────
@@ -1214,9 +1247,13 @@ class PreviewWin(tk.Toplevel):
         self.edit_toolbar = tk.Frame(self, bg=TOOLBAR)
         self.tool_btns = {}
         for key, label in [("select","🖱 선택"), ("text","T 텍스트"),
-                           ("rect","▭ 사각형"), ("arrow","↗ 화살표"), ("highlight","🖊 강조")]:
+                           ("rect","▭ 사각형"), ("arrow","↗ 화살표"), ("highlight","🖊 강조"),
+                           ("pan","✋ 이동")]:
+            # "이동" 은 다른 도구처럼 클릭 시 즉시 전환되는 게 아니라, 다시
+            # 누르면 꺼지는 토글 버튼(눌러서 켬 → 다시 눌러서 꺼짐)이다.
+            cmd = self._toggle_pan_tool if key == "pan" else (lambda k=key: self._set_tool(k))
             b = tk.Button(self.edit_toolbar, text=label,
-                          command=lambda k=key: self._set_tool(k),
+                          command=cmd,
                           bg=TOOLBAR, fg=TEXT_DIM, font=FONT_B,
                           relief="flat", padx=14, pady=6, cursor="hand2",
                           bd=0, activebackground=_shade(TOOLBAR, 0.92))
@@ -1579,10 +1616,18 @@ class PreviewWin(tk.Toplevel):
         else:
             self.edit_toolbar.pack_forget()
             self._select_annot(None)
+            # 편집모드를 나가면 팬 관련 임시 상태도 함께 정리한다.
+            self._pan_active = False
+            self._space_key_down = False
+            if self._space_hold_pending is not None:
+                self.after_cancel(self._space_hold_pending)
+                self._space_hold_pending = None
         self._show()
 
     def _set_tool(self, key):
         self.tool = key
+        if key != "pan":
+            self._pan_active = False
         for k, b in self.tool_btns.items():
             active = (k == key)
             b.config(bg=ACCENT if active else TOOLBAR,
@@ -1591,9 +1636,57 @@ class PreviewWin(tk.Toplevel):
             cursor = "xterm"
         elif key in ("rect", "arrow", "highlight"):
             cursor = "crosshair"
+        elif key == "pan":
+            cursor = "fleur"
         else:
             cursor = ""
         self.canvas.config(cursor=cursor)
+
+    # ── 이동(팬) 도구 켬/끔 ────────────────────────────────
+    def _enable_pan(self):
+        if self._pan_active: return
+        self._tool_before_pan = self.tool
+        self._pan_active = True
+        self._set_tool("pan")   # key=="pan" 이므로 _set_tool 내부에서 _pan_active 를 건드리지 않음
+
+    def _disable_pan(self):
+        if not self._pan_active: return
+        self._pan_active = False
+        self._set_tool(self._tool_before_pan or "select")
+
+    def _toggle_pan_tool(self):
+        """도구모음의 '이동' 버튼: 누르면 켜지고, 다시 누르면 꺼진다."""
+        if self._pan_active:
+            self._disable_pan()
+        else:
+            self._enable_pan()
+
+    # ── 스페이스바로 임시 팬(누르는 동안만) / 팬 토글 끄기 ────
+    def _on_space_press(self, e):
+        if not self.edit_mode or self._focus_in_entry():
+            return
+        if self._space_hold_pending is not None:
+            # 키보드 자동반복(auto-repeat)으로 생긴 릴리즈 예약을 취소 —
+            # 실제로는 계속 눌려있는 중이므로 아무 것도 바꾸지 않는다.
+            self.after_cancel(self._space_hold_pending)
+            self._space_hold_pending = None
+            return
+        if self._space_key_down:
+            return
+        self._space_key_down = True
+        self._enable_pan()
+
+    def _on_space_release(self, e):
+        if self._focus_in_entry() or not self._space_key_down:
+            return
+        # 자동반복 중 오는 가짜 릴리즈를 걸러내기 위해 살짝 지연 후 처리 —
+        # 그 사이에 다음 KeyPress-space 가 오면 위에서 예약을 취소한다.
+        self._space_hold_pending = self.after(35, self._finish_space_release)
+
+    def _finish_space_release(self):
+        self._space_hold_pending = None
+        self._space_key_down = False
+        self._disable_pan()
 
     def _focus_in_entry(self):
         """속성 패널의 입력창에 포커스가 있는지 확인 (단축키 충돌 방지용)."""
@@ -1938,7 +2031,16 @@ class OrganizeTab(tk.Frame):
         self.hover_idx = None
         self._rid      = None
         self.status_cb = None   # 상태 표시줄 갱신 콜백 (App 에서 연결)
+        self._dirty    = False  # 마지막 내보내기 이후 반영 안 된 변경이 있는지
         self._build()
+
+    def _mark_dirty(self):
+        self._dirty = True
+
+    def has_unsaved_changes(self):
+        """페이지가 있는데 마지막 내보내기 이후로 변경(추가/삭제/편집/회전 등)이
+        있었으면 True — 프로그램 종료 시 확인 질문을 띄울지 판단하는 데 쓴다."""
+        return bool(self.pages) and self._dirty
 
     @property
     def CW(self):     return int(self.CW0   * self.scale)
@@ -2323,6 +2425,7 @@ class OrganizeTab(tk.Frame):
             if tgt > src: tgt -= 1
             if src != tgt:
                 pg = self.pages.pop(src); self.pages.insert(tgt, pg)
+                self._mark_dirty()
         # 단순 클릭은 아무 동작 없음 (미리보기는 🔍 버튼 또는 더블클릭으로)
         self.drag_src = self.drag_tgt = None
         self.drag_moved = False
@@ -2368,6 +2471,7 @@ class OrganizeTab(tk.Frame):
         if   key == "preview": self._open_preview(idx)
         elif key == "rotate":
             self.pages[idx]["rot"] = (self.pages[idx].get("rot",0)+90)%360
+            self._mark_dirty()
             self._render()
         elif key == "dup":
             pg = dict(self.pages[idx]); pg["id"] = next(_id_gen)
@@ -2375,10 +2479,14 @@ class OrganizeTab(tk.Frame):
             # 원본과 복제본이 같은 리스트를 공유하게 된다 — 반드시 새 리스트로
             # 깊은 복사해서 이후 편집이 서로 독립적이도록 한다.
             pg["annots"] = [dict(a) for a in pg.get("annots", [])]
-            self.pages.insert(idx+1, pg); self._render()
+            self.pages.insert(idx+1, pg)
+            self._mark_dirty()
+            self._render()
         elif key == "delete":
             self.pages.pop(idx)
-            self.hover_idx = None; self._render()
+            self.hover_idx = None
+            self._mark_dirty()
+            self._render()
 
     # ── 체크박스 전체선택 / 삭제 / 회전 ────────────────────
     def _toggle_all(self):
@@ -2390,12 +2498,15 @@ class OrganizeTab(tk.Frame):
         if not self.checked:
             messagebox.showinfo("알림","삭제할 페이지를 선택하세요."); return
         self.pages = [pg for pg in self.pages if pg["id"] not in self.checked]
-        self.checked.clear(); self._render()
+        self.checked.clear()
+        self._mark_dirty()
+        self._render()
 
     def _rotate_checked(self):
         tgt = self.checked or {pg["id"] for pg in self.pages}
         for pg in self.pages:
             if pg["id"] in tgt: pg["rot"]=(pg.get("rot",0)+90)%360
+        self._mark_dirty()
         self._render()
 
     # ── 파일 관리 ────────────────────────────────────────────
@@ -2453,6 +2564,7 @@ class OrganizeTab(tk.Frame):
             return None
 
     def _load_pdfs(self, paths):
+        n_before = len(self.pages)
         for path in paths:
             try:
                 src_image_ext = None
@@ -2481,6 +2593,8 @@ class OrganizeTab(tk.Frame):
                 if fdoc is not None: fdoc.close()
             except Exception as e:
                 messagebox.showerror("오류",f"{os.path.basename(path)}\n{e}")
+        if len(self.pages) != n_before:
+            self._mark_dirty()
         self._render()
 
     def _clear(self):
@@ -2496,6 +2610,7 @@ class OrganizeTab(tk.Frame):
         """미리보기에서 텍스트/도형을 추가·수정해도 정리 탭 카드
         썸네일에는 반영되지 않던 문제 수정 — 내보내기와 같은 굽기
         로직으로 썸네일을 다시 만들어 캐시를 갱신한다."""
+        self._mark_dirty()
         for pg in self.pages:
             thumb = make_thumb_for_page(pg, self.TW0, self.TH0)
             if thumb is not None:
@@ -2532,6 +2647,7 @@ class OrganizeTab(tk.Frame):
                     messagebox.showerror("오류", "이미지로 저장하려면 pymupdf(fitz)가 필요합니다.")
                     return
                 saved = self._export_as_images(out, ext)
+                self._dirty = False
                 if len(saved) == 1:
                     messagebox.showinfo("완료", f"저장 완료!\n{saved[0]}")
                 else:
@@ -2539,9 +2655,11 @@ class OrganizeTab(tk.Frame):
                         f"페이지마다 별도 파일로 {len(saved)}개 저장 완료!\n{os.path.dirname(saved[0])}")
             elif PREVIEW_OK:
                 self._export_with_fitz(out)
+                self._dirty = False
                 messagebox.showinfo("완료", f"저장 완료!\n{out}")
             else:
                 self._export_with_pypdf(out)
+                self._dirty = False
                 messagebox.showinfo("완료", f"저장 완료!\n{out}")
         except Exception as e:
             messagebox.showerror("오류",str(e))
@@ -3129,6 +3247,20 @@ class App(TkinterDnD.Tk if DND_OK else tk.Tk):
             pass
         self._build()
         self.after(3000, lambda: _check_update(self))  # 3초 후 백그라운드 업데이트 확인
+        self.protocol("WM_DELETE_WINDOW", self._on_close_request)
+
+    def _on_close_request(self):
+        """내보내기 하지 않은 변경사항이 있는 상태로 프로그램을 통째로
+        종료하려 하면 한 번 확인한다. 탭을 바꾸는 것과는 무관 — 창을 닫을
+        때만(X 버튼/Alt+F4 등) 호출된다."""
+        ot = self.tabs.get("organize")
+        if ot is not None and ot.has_unsaved_changes():
+            if not messagebox.askyesno(
+                "종료 확인",
+                "내보내기 하지 않은 변경사항이 있습니다.\n그래도 종료하시겠습니까?",
+                parent=self):
+                return
+        self.destroy()
 
     def _build(self):
         # 헤더
