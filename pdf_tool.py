@@ -5,7 +5,7 @@ PDF 도구  ·  무료 · 오프라인 · 완전 로컬
 """
 import sys, os, shutil, subprocess, threading, zipfile, math, tempfile
 
-VERSION = "20260828.0940"                       # 배포.bat 이 자동 업데이트
+VERSION = "20260828.1527"                       # 배포.bat 이 자동 업데이트
 GITHUB_REPO  = "Disziplin1/pdf-tool"
 
 # 실행기(launcher.py)가 관리하는 설치 구조:
