@@ -576,8 +576,6 @@ def make_thumb_for_page(pg, tw, th, factor=2.5):
 #  텍스트 속성 패널 (PreviewWin 우측에 붙는다, 선택 시에만 표시)
 # ══════════════════════════════════════════════════════════
 class TextPropPanel(tk.Frame):
-    ALIGN_CHOICES = [("좌측", "left"), ("가운데", "center"), ("우측", "right")]
-
     def __init__(self, master, owner):
         super().__init__(master, bg=PANEL, width=230)
         self.owner = owner          # PreviewWin 인스턴스 (변경 통지용)
@@ -637,19 +635,19 @@ class TextPropPanel(tk.Frame):
         self.page_size_lbl = tk.Label(self, text="", font=FONT_XS, bg=PANEL, fg=TEXT_DIM)
         self.page_size_lbl.pack(anchor="w", padx=14, pady=(2,8))
 
-        # ── 글꼴 ──────────────────────────────────────────
-        tk.Label(self, text="글꼴", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(anchor="w", **pad)
-        self.font_var = tk.StringVar()
-        self.font_combo = ttk.Combobox(self, textvariable=self.font_var, values=self._font_list(),
-                                        state="readonly", font=FONT_S)
-        self.font_combo.pack(fill="x", padx=14, pady=(2,8))
-        self.font_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_font())
-
-        # ── 크기 ──────────────────────────────────────────
+        # ── 크기 (- [숫자입력] + 스테퍼) ─────────────────────
         tk.Label(self, text="크기 (pt)", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(anchor="w", **pad)
+        size_row = tk.Frame(self, bg=PANEL); size_row.pack(fill="x", padx=14, pady=(2,8))
+        tk.Button(size_row, text="−", command=lambda: self._step_size(-1),
+                  bg=TOOLBAR, fg=TEXT, font=FONT_B, relief="flat", bd=0, width=2,
+                  cursor="hand2", activebackground=_shade(TOOLBAR, 0.9)).pack(side="left")
         self.size_var = tk.StringVar()
-        e_size = tk.Entry(self, textvariable=self.size_var, font=FONT, width=9, bg="white", fg=TEXT)
-        e_size.pack(anchor="w", padx=14, pady=(2,8))
+        e_size = tk.Entry(size_row, textvariable=self.size_var, font=FONT, width=5,
+                           bg="white", fg=TEXT, justify="center")
+        e_size.pack(side="left", padx=4)
+        tk.Button(size_row, text="+", command=lambda: self._step_size(1),
+                  bg=TOOLBAR, fg=TEXT, font=FONT_B, relief="flat", bd=0, width=2,
+                  cursor="hand2", activebackground=_shade(TOOLBAR, 0.9)).pack(side="left")
         e_size.bind("<Return>", lambda e: self._apply_size())
         e_size.bind("<FocusOut>", lambda e: self._apply_size())
 
@@ -677,15 +675,14 @@ class TextPropPanel(tk.Frame):
                        activebackground=PANEL, font=FONT_S, bd=0,
                        highlightthickness=0).pack(side="left", padx=4)
 
-        # ── 정렬 ──────────────────────────────────────────
+        # ── 정렬 (좌/가운데/우측 아이콘 버튼) ────────────────
         tk.Label(self, text="정렬", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(anchor="w", **pad)
-        self.align_var = tk.StringVar()
-        self.align_combo = ttk.Combobox(
-            self, textvariable=self.align_var,
-            values=[label for label, _ in self.ALIGN_CHOICES],
-            state="readonly", font=FONT_S)
-        self.align_combo.pack(fill="x", padx=14, pady=(2,8))
-        self.align_combo.bind("<<ComboboxSelected>>", lambda e: self._apply_align())
+        align_row = tk.Frame(self, bg=PANEL); align_row.pack(fill="x", padx=14, pady=(2,8))
+        self.align_btns = {}
+        for key in ("left", "center", "right"):
+            btn = self._make_align_icon(align_row, key)
+            btn.pack(side="left", padx=(0,6))
+            self.align_btns[key] = btn
 
         # ── 회전 (텍스트 자체 회전 — 페이지 회전과 별개) ──
         tk.Label(self, text="회전 (°)", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(anchor="w", **pad)
@@ -706,13 +703,51 @@ class TextPropPanel(tk.Frame):
         if self.annot is None: return
         self.owner._delete_selected_annot()
 
-    def _font_list(self):
+    # ── 정렬 아이콘 버튼 ──────────────────────────────────
+    def _make_align_icon(self, parent, align_key):
+        """좌/가운데/우측 정렬 아이콘(막대 3개)을 캔버스에 직접 그려서
+        만든 버튼. 클릭하면 그 정렬로 바꾸고, 현재 선택된 정렬은 배경을
+        강조색으로 표시한다."""
+        c = tk.Canvas(parent, width=40, height=26, bg=TOOLBAR, highlightthickness=0, cursor="hand2")
+        bar_w, bar_h, gap, x_pad, y0 = 24, 3, 5, 8, 6
+        widths = (bar_w, bar_w * 0.65, bar_w * 0.85)
+        for i, w in enumerate(widths):
+            y = y0 + i * (bar_h + gap)
+            if align_key == "left":
+                x0 = x_pad
+            elif align_key == "center":
+                x0 = x_pad + (bar_w - w) / 2
+            else:
+                x0 = x_pad + (bar_w - w)
+            c.create_rectangle(x0, y, x0 + w, y + bar_h, fill=TEXT_DIM, outline="", tags="bar")
+        c.bind("<Button-1>", lambda e, k=align_key: self._set_align(k))
+        return c
+
+    def _set_align(self, key):
+        if self.annot is None: return
+        self.annot["align"] = key
+        self._refresh_align_buttons()
+        self.owner._on_annot_prop_changed()
+
+    def _refresh_align_buttons(self):
+        cur = self.annot.get("align", "left") if self.annot else "left"
+        for key, btn in self.align_btns.items():
+            active = (key == cur)
+            btn.config(bg=ACCENT if active else TOOLBAR)
+            fill = "white" if active else TEXT_DIM
+            for item in btn.find_withtag("bar"):
+                btn.itemconfig(item, fill=fill)
+
+    # ── 크기 스테퍼(-/+) ──────────────────────────────────
+    def _step_size(self, delta):
+        if self.annot is None: return
         try:
-            from tkinter import font as tkfont
-            names = sorted(set(tkfont.families(self)))
-            return names if names else [DEFAULT_ANNOT_FONT]
-        except Exception:
-            return [DEFAULT_ANNOT_FONT]
+            v = float(self.size_var.get())
+        except ValueError:
+            v = self.annot.get("font_size", DEFAULT_ANNOT_SIZE)
+        v = max(1.0, v + delta)
+        self.size_var.set(f"{v:.2f}")
+        self._apply_size()
 
     # ── annot 표시 ────────────────────────────────────────
     def show_annot(self, annot, page_w_pt, page_h_pt):
@@ -723,14 +758,10 @@ class TextPropPanel(tk.Frame):
         self.text_var.set(annot.get("text", ""))
         self.x_var.set(f"{pt_to_mm(annot['x']):.2f}")
         self.y_var.set(f"{self._y_pt_to_disp_mm(annot['y']):.2f}")
-        font_name = annot.get("font", DEFAULT_ANNOT_FONT)
-        self.font_var.set(font_name if font_name in self.font_combo["values"] else DEFAULT_ANNOT_FONT)
         self.size_var.set(f"{annot.get('font_size', DEFAULT_ANNOT_SIZE):.2f}")
         self.bold_var.set(bool(annot.get("bold", False)))
         self.italic_var.set(bool(annot.get("italic", False)))
-        align_key = annot.get("align", "left")
-        label = next((lbl for lbl, val in self.ALIGN_CHOICES if val == align_key), "좌측")
-        self.align_var.set(label)
+        self._refresh_align_buttons()
         self.rot_var.set(f"{annot.get('rotation', 0.0):.1f}")
         color = annot.get("color", DEFAULT_ANNOT_COLOR)
         try: self.color_btn.config(bg=color)
@@ -835,22 +866,10 @@ class TextPropPanel(tk.Frame):
         self.rot_var.set(f"{rot:.1f}")
         self.owner._on_annot_prop_changed()
 
-    def _apply_font(self):
-        if self.annot is None: return
-        self.annot["font"] = self.font_var.get() or DEFAULT_ANNOT_FONT
-        self.owner._on_annot_prop_changed()
-
     def _apply_style(self):
         if self.annot is None: return
         self.annot["bold"] = bool(self.bold_var.get())
         self.annot["italic"] = bool(self.italic_var.get())
-        self.owner._on_annot_prop_changed()
-
-    def _apply_align(self):
-        if self.annot is None: return
-        label = self.align_var.get()
-        val = next((v for l, v in self.ALIGN_CHOICES if l == label), "left")
-        self.annot["align"] = val
         self.owner._on_annot_prop_changed()
 
     def _pick_color(self):

@@ -639,10 +639,9 @@ class TestPropertyPanel(unittest.TestCase):
         pages = self._make_pages()
         pw, annot = self._open_preview_with_text(pages)
         panel = pw.prop_panel
-        for label, expect in [("좌측","left"), ("가운데","center"), ("우측","right")]:
-            panel.align_var.set(label)
-            panel._apply_align()
-            self.assertEqual(annot["align"], expect)
+        for key in ("left", "center", "right"):
+            panel._set_align(key)
+            self.assertEqual(annot["align"], key)
 
     def test_text_rotation_independent_of_page_rotation(self):
         pages = self._make_pages()
@@ -667,16 +666,72 @@ class TestPropertyPanel(unittest.TestCase):
             mock_warn.assert_called_once()
         self.assertEqual(annot["rotation"], 0.0)
 
-    def test_font_selection_applies(self):
+    def test_font_is_fixed_to_korean_capable_font(self):
+        """글꼴 선택 UI는 제거되었고, 한글 지원 폰트로 고정된다
+        (Arial 등 한글 미지원 폰트로 바뀌어 PDF 출력이 깨지는 것을 방지)."""
         pages = self._make_pages()
         pw, annot = self._open_preview_with_text(pages)
         panel = pw.prop_panel
-        fonts = list(panel.font_combo["values"])
-        self.assertTrue(fonts)
-        other = next((f for f in fonts if f != annot.get("font")), fonts[0])
-        panel.font_var.set(other)
-        panel._apply_font()
-        self.assertEqual(annot["font"], other)
+        self.assertFalse(hasattr(panel, "font_var"))
+        self.assertFalse(hasattr(panel, "font_combo"))
+        self.assertEqual(annot.get("font"), pt.DEFAULT_ANNOT_FONT)
+        self.assertNotEqual(pt.DEFAULT_ANNOT_FONT.lower(), "arial")
+
+    def test_align_icon_buttons_highlight_active_selection(self):
+        """정렬 아이콘 버튼 중 현재 선택된 것만 강조색(ACCENT) 배경이 되고
+        나머지는 TOOLBAR 배경으로 돌아가야 한다."""
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        panel = pw.prop_panel
+        for key in ("left", "center", "right"):
+            panel._set_align(key)
+            for other_key, btn in panel.align_btns.items():
+                expect_bg = pt.ACCENT if other_key == key else pt.TOOLBAR
+                self.assertEqual(str(btn.cget("bg")), expect_bg)
+
+    def test_show_annot_reflects_existing_align_state(self):
+        """기존에 정렬이 설정된 annot 을 선택하면 그에 맞는 아이콘 버튼이
+        미리 강조 표시되어야 한다."""
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        panel = pw.prop_panel
+        annot["align"] = "center"
+        pw._select_annot(None)
+        pw._select_annot(annot["id"])
+        self.assertEqual(str(panel.align_btns["center"].cget("bg")), pt.ACCENT)
+        self.assertEqual(str(panel.align_btns["left"].cget("bg")), pt.TOOLBAR)
+        self.assertEqual(str(panel.align_btns["right"].cget("bg")), pt.TOOLBAR)
+
+    def test_font_size_stepper_increments_and_decrements(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        panel = pw.prop_panel
+        panel.size_var.set("20.00")
+        panel._apply_size()
+        panel._step_size(1)
+        self.assertEqual(annot["font_size"], 21.0)
+        self.assertEqual(panel.size_var.get(), "21.00")
+        panel._step_size(-1)
+        self.assertEqual(annot["font_size"], 20.0)
+        self.assertEqual(panel.size_var.get(), "20.00")
+
+    def test_font_size_stepper_clamps_at_minimum(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        panel = pw.prop_panel
+        panel.size_var.set("1.00")
+        panel._apply_size()
+        panel._step_size(-1)
+        self.assertEqual(annot["font_size"], 1.0)
+        self.assertEqual(panel.size_var.get(), "1.00")
+
+    def test_font_size_direct_entry_still_works(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        panel = pw.prop_panel
+        panel.size_var.set("33.50")
+        panel._apply_size()
+        self.assertEqual(annot["font_size"], 33.5)
 
     # ── 정렬을 바꿔도 저장된 X/Y 좌표 자체는 그대로(기준선 역할) ──
     def test_xy_unchanged_but_anchor_follows_align(self):
@@ -687,14 +742,13 @@ class TestPropertyPanel(unittest.TestCase):
         pw, annot = self._open_preview_with_text(pages)
         x_before, y_before = annot["x"], annot["y"]
         panel = pw.prop_panel
-        expect_anchor = {"좌측": "nw", "가운데": "n", "우측": "ne"}
-        for label in ("좌측", "가운데", "우측"):
-            panel.align_var.set(label)
-            panel._apply_align()
+        expect_anchor = {"left": "nw", "center": "n", "right": "ne"}
+        for key in ("left", "center", "right"):
+            panel._set_align(key)
             self.assertEqual(annot["x"], x_before)
             self.assertEqual(annot["y"], y_before)
             items = pw.canvas.find_withtag(f"annot_{annot['id']}")
-            self.assertEqual(pw.canvas.itemcget(items[0], "anchor"), expect_anchor[label])
+            self.assertEqual(pw.canvas.itemcget(items[0], "anchor"), expect_anchor[key])
 
     # ── 페이지 복제 시 새 필드도 독립적으로 복사되는지 ─────────
     def test_duplicate_page_copies_new_fields_independently(self):
@@ -779,13 +833,13 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         annot = pages[0]["annots"][0]
         x0, y0 = annot["x"], annot["y"]
         panel = pw.prop_panel
-        expect_anchor = {"좌측": "nw", "가운데": "n", "우측": "ne"}
-        for label in ("좌측", "가운데", "우측"):
-            panel.align_var.set(label); panel._apply_align()
+        expect_anchor = {"left": "nw", "center": "n", "right": "ne"}
+        for key in ("left", "center", "right"):
+            panel._set_align(key)
             self.assertEqual(annot["x"], x0)
             self.assertEqual(annot["y"], y0)
             items = pw.canvas.find_withtag(f"annot_{annot['id']}")
-            self.assertEqual(pw.canvas.itemcget(items[0], "anchor"), expect_anchor[label])
+            self.assertEqual(pw.canvas.itemcget(items[0], "anchor"), expect_anchor[key])
 
     # ── 2/3. 페이지 회전 vs 텍스트 회전 완전 분리 + 0/90/180/270 실측 ──
     def test_page_and_text_rotation_are_fully_independent_all_angles(self):
@@ -943,9 +997,9 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         pw._toggle_edit()
         pw._select_annot(legacy["id"])   # 속성 패널에 기본값으로 채워져야 함
         panel = pw.prop_panel
-        self.assertEqual(panel.font_var.get(), pt.DEFAULT_ANNOT_FONT)
+        self.assertEqual(legacy.get("font", pt.DEFAULT_ANNOT_FONT), pt.DEFAULT_ANNOT_FONT)
         self.assertEqual(panel.size_var.get(), f"{pt.DEFAULT_ANNOT_SIZE:.2f}")
-        self.assertEqual(panel.align_var.get(), "좌측")
+        self.assertEqual(panel.align_btns["left"].cget("bg"), pt.ACCENT)
         self.assertFalse(panel.bold_var.get())
         self.assertFalse(panel.italic_var.get())
         self.assertEqual(panel.rot_var.get(), "0.0")
