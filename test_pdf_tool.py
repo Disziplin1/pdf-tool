@@ -723,6 +723,18 @@ class TestPropertyPanel(unittest.TestCase):
         self.assertEqual(annot["font_size"], 20.0)
         self.assertEqual(panel.size_var.get(), "20.00")
 
+    def test_font_size_step_buttons_use_5_point_increment(self):
+        """+/- 버튼을 실제로 눌렀을 때 5pt씩 늘고 줄어야 한다."""
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        panel = pw.prop_panel
+        panel.size_var.set("20.00")
+        panel._apply_size()
+        panel.size_plus_btn.invoke()
+        self.assertEqual(annot["font_size"], 25.0)
+        panel.size_minus_btn.invoke()
+        self.assertEqual(annot["font_size"], 20.0)
+
     def test_font_size_stepper_clamps_at_minimum(self):
         pages = self._make_pages()
         pw, annot = self._open_preview_with_text(pages)
@@ -1235,6 +1247,9 @@ class TestUsabilityImprovements(unittest.TestCase):
         pw, annot = self._open_preview_with_text(pages)
         pw._set_tool("select")
         pw._select_annot(None)   # 아무것도 선택 안 된 상태에서 빈 곳을 드래그
+        # 선택 도구에서는 더 이상 빈 공간 드래그로 팬이 되지 않으므로(요청에
+        # 따라 제거됨), 전용 "이동" 도구를 켜고 나서 팬 동작을 검증한다.
+        pw._toggle_pan_tool()
 
         show_calls = []
         orig_show = pt.PreviewWin._show
@@ -2576,6 +2591,22 @@ class TestPanToolAndSpacebar(unittest.TestCase):
         self.assertIsNone(pw.selected_id)
         self.assertEqual(pw.pan_x, 50)
         self.assertEqual(pw.pan_y, 40)
+
+    def test_select_tool_blank_drag_no_longer_pans(self):
+        """선택 도구에서는 빈 공간을 드래그해도 화면이 팬되지 않아야 한다
+        (팬은 이제 전용 이동 버튼/스페이스바로만) — 사용자 요청에 따른 변경."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("select")
+        pan_x_before, pan_y_before = pw.pan_x, pw.pan_y
+        cx_before, cy_before = pw._cx, pw._cy
+        pw._on_canvas_press(FakeEvent(x=50, y=50))
+        pw._on_canvas_motion(FakeEvent(x=90, y=80))
+        pw._on_canvas_release(FakeEvent(x=90, y=80))
+        self.assertEqual(pw.pan_x, pan_x_before)
+        self.assertEqual(pw.pan_y, pan_y_before)
+        self.assertEqual(pw._cx, cx_before)
+        self.assertEqual(pw._cy, cy_before)
 
 
 class TestUnsavedExportExitConfirmation(unittest.TestCase):

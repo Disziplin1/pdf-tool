@@ -646,16 +646,19 @@ class TextPropPanel(tk.Frame):
         # ── 크기 (- [숫자입력] + 스테퍼) ─────────────────────
         tk.Label(self, text="크기 (pt)", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(anchor="w", **pad)
         size_row = tk.Frame(self, bg=PANEL); size_row.pack(fill="x", padx=14, pady=(2,8))
-        tk.Button(size_row, text="−", command=lambda: self._step_size(-1),
+        self.SIZE_STEP = 5
+        self.size_minus_btn = tk.Button(size_row, text="−", command=lambda: self._step_size(-self.SIZE_STEP),
                   bg=TOOLBAR, fg=TEXT, font=FONT_B, relief="flat", bd=0, width=2,
-                  cursor="hand2", activebackground=_shade(TOOLBAR, 0.9)).pack(side="left")
+                  cursor="hand2", activebackground=_shade(TOOLBAR, 0.9))
+        self.size_minus_btn.pack(side="left")
         self.size_var = tk.StringVar()
         e_size = tk.Entry(size_row, textvariable=self.size_var, font=FONT, width=5,
                            bg="white", fg=TEXT, justify="center")
         e_size.pack(side="left", padx=4)
-        tk.Button(size_row, text="+", command=lambda: self._step_size(1),
+        self.size_plus_btn = tk.Button(size_row, text="+", command=lambda: self._step_size(self.SIZE_STEP),
                   bg=TOOLBAR, fg=TEXT, font=FONT_B, relief="flat", bd=0, width=2,
-                  cursor="hand2", activebackground=_shade(TOOLBAR, 0.9)).pack(side="left")
+                  cursor="hand2", activebackground=_shade(TOOLBAR, 0.9))
+        self.size_plus_btn.pack(side="left")
         e_size.bind("<Return>", lambda e: self._apply_size())
         e_size.bind("<FocusOut>", lambda e: self._apply_size())
 
@@ -1482,6 +1485,9 @@ class PreviewWin(tk.Toplevel):
                 return
             else:
                 self._select_annot(None)
+                # 선택 도구에서는 빈 공간을 드래그해도 화면이 팬되지 않는다 —
+                # 팬은 이제 전용 "이동" 버튼이나 스페이스바로만 한다.
+                return
         self._pan_start(e)
 
     def _on_canvas_motion(self, e):
