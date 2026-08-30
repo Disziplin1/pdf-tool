@@ -1468,6 +1468,37 @@ class TestUsabilityImprovements(unittest.TestCase):
         self.assertEqual(int(pw.fullscreen_btn.pack_info()["padx"]), 0)
         self.assertEqual(int(pw.close_btn.pack_info()["padx"]), 0)
 
+    def test_side_panel_holder_reserved_throughout_edit_mode(self):
+        """속성 패널을 선택/해제해도 그 자리(고정폭 컨테이너)는 편집모드가
+        켜져있는 동안 계속 잡혀있어야 한다 — 그래야 선택할 때마다 캔버스
+        폭이 바뀌어 PDF 미리보기가 좌우로 밀려 보이는 문제가 생기지 않는다."""
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        self.assertEqual(pw.side_panel_holder.pack_info().get("side"), "right")
+        pw._select_annot(None)
+        self.assertEqual(pw.side_panel_holder.pack_info().get("side"), "right")
+        pw._select_annot(annot["id"])
+        self.assertEqual(pw.side_panel_holder.pack_info().get("side"), "right")
+
+    def test_prop_panels_nested_inside_fixed_width_holder_not_main_split(self):
+        """텍스트/도형 속성 패널은 캔버스와 폭을 나눠 갖는 mid 프레임에
+        직접 들어가는 게 아니라, 항상 자리를 차지하는 고정폭 holder 안에
+        중첩되어 있어야 한다 — 그래야 패널을 pack()/pack_forget() 해도
+        캔버스 폭(cf)에는 영향이 없다."""
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        self.assertIs(pw.prop_panel.master, pw.side_panel_holder)
+        self.assertIs(pw.shape_panel.master, pw.side_panel_holder)
+        self.assertIs(pw.side_panel_holder.master, pw.preview_cf)
+
+    def test_side_panel_holder_unpacked_when_leaving_edit_mode(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        self.assertEqual(pw.side_panel_holder.pack_info().get("side"), "right")
+        pw._toggle_edit()   # 편집모드 종료
+        with self.assertRaises(pt.tk.TclError):
+            pw.side_panel_holder.pack_info()
+
     def test_close_button_hover_highlights_red(self):
         # 합성 <Enter>/<Leave>(포인터 계열) 이벤트는 Xvfb 에 창관리자가 없고
         # 클래스 공용 root 가 withdraw() 상태면 자식 Toplevel 까지 전달되지

@@ -1267,9 +1267,15 @@ class PreviewWin(tk.Toplevel):
         mid = tk.Frame(self, bg=BG)
         self.preview_cf = mid
         mid.pack(fill="both", expand=True)
-        # 속성 패널은 텍스트/도형을 선택했을 때만 pack() 되어 나타난다 (17번 요구사항)
-        self.prop_panel  = TextPropPanel(mid, owner=self)
-        self.shape_panel = ShapePropPanel(mid, owner=self)
+        # 속성 패널을 담는 고정폭 컨테이너. 선택할 때마다 이 안에서만
+        # pack()/pack_forget() 하고, 컨테이너 자체는 편집모드가 켜져있는
+        # 동안 항상 폭을 차지하고 있게 해서, 텍스트/도형을 선택·해제할
+        # 때마다 캔버스 폭이 바뀌어 PDF 미리보기가 좌우로 밀리는 문제를
+        # 없앤다 (편집모드 진입/이탈 시에만 한 번 자리를 잡는다).
+        self.side_panel_holder = tk.Frame(mid, bg=BG, width=230)
+        self.side_panel_holder.pack_propagate(False)
+        self.prop_panel  = TextPropPanel(self.side_panel_holder, owner=self)
+        self.shape_panel = ShapePropPanel(self.side_panel_holder, owner=self)
 
         cf = tk.Frame(mid, bg=BG)
         cf.pack(side="left", fill="both", expand=True, padx=30, pady=12)
@@ -1618,10 +1624,15 @@ class PreviewWin(tk.Toplevel):
                               fg="white" if self.edit_mode else TEXT_DIM)
         if self.edit_mode:
             self.edit_toolbar.pack(fill="x", before=self.preview_cf)
+            # 속성 패널 자리를 편집모드 진입 시 미리 확보해둔다 — 선택할
+            # 때마다 새로 자리를 만들면 그때마다 캔버스 폭이 바뀌어 PDF가
+            # 좌우로 밀려 보이는 문제가 있었다.
+            self.side_panel_holder.pack(side="right", fill="y")
             self._set_tool(self.tool)
         else:
             self.edit_toolbar.pack_forget()
             self._select_annot(None)
+            self.side_panel_holder.pack_forget()
             # 편집모드를 나가면 팬 관련 임시 상태도 함께 정리한다.
             self._pan_active = False
             self._space_key_down = False
