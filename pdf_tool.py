@@ -1475,8 +1475,11 @@ class PreviewWin(tk.Toplevel):
         # 따라 그 아래 레이어 목록이 매번 위아래로 튀는 문제가 있었다.
         # 둘 중 더 큰 높이로 이 자리 자체를 고정해서, 무엇을 선택하든
         # (또는 아무것도 선택 안 하든) 레이어 목록이 항상 같은 위치에서
-        # 시작하게 한다.
-        self.prop_zone = tk.Frame(self.side_panel_holder, bg=BG)
+        # 시작하게 한다. 배경은 앱 기본색(BG, 연회색)이 아니라 패널과
+        # 같은 흰색(PANEL)으로 둬서 — 도형 패널처럼 내용이 짧게 끝나
+        # 남는 공간이 생겨도 회색 틈이 도드라져 "구멍 난 것처럼" 보이지
+        # 않고 흰 패널이 자연스럽게 이어지는 것처럼 보이게 한다.
+        self.prop_zone = tk.Frame(self.side_panel_holder, bg=PANEL)
         self.prop_zone.pack(side="top", fill="x")
         self.prop_panel  = TextPropPanel(self.prop_zone, owner=self)
         self.shape_panel = ShapePropPanel(self.prop_zone, owner=self)
