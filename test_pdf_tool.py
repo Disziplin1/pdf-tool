@@ -2708,5 +2708,650 @@ class TestUnsavedExportExitConfirmation(unittest.TestCase):
         self.assertTrue(ot.has_unsaved_changes())
 
 
+# ══════════════════════════════════════════════════════════
+#  Undo / Redo (PreviewWin 의 annotation 편집 전용)
+# ══════════════════════════════════════════════════════════
+class TestUndoRedo(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pt.TkinterDnD.Tk() if pt.DND_OK else pt.tk.Tk()
+        cls.root.withdraw()
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_undoredo_test_")
+        cls.pdf_path = os.path.join(cls.tmpdir, "sample.pdf")
+        make_pdf(cls.pdf_path, sizes=((595.28, 841.89), (595.28, 841.89)))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _make_pages(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        return ot.pages
+
+    def _open_preview(self, pages, start=0):
+        pw = pt.PreviewWin(self.root, pages, start)
+        pw.update_idletasks(); pw.geometry("1150x820+0+0"); pw.update(); pw._show()
+        self.addCleanup(pw.destroy)
+        pw._toggle_edit()
+        return pw
+
+    def _drag_create(self, pw, tool, p0, p1):
+        pw._set_tool(tool)
+        pw._on_canvas_press(FakeEvent(x=p0[0], y=p0[1]))
+        pw._on_canvas_motion(FakeEvent(x=p1[0], y=p1[1]))
+        pw._on_canvas_release(FakeEvent(x=p1[0], y=p1[1]))
+
+    def _drag_move(self, pw, p0, p1):
+        """select 도구로 전환해 p0 위치의 annot 을 눌러 p1 로 드래그한다.
+        모션 이벤트를 여러 번 나눠 보내 실제 마우스 드래그(중간 지점들을
+        거치는)와 같은 상황을 재현한다 — 연속 드래그가 Undo 1개로만
+        남는지 확인하는 테스트들에서 특히 중요하다."""
+        pw._set_tool("select")
+        pw._on_canvas_press(FakeEvent(x=p0[0], y=p0[1]))
+        steps = 5
+        for i in range(1, steps + 1):
+            x = p0[0] + (p1[0] - p0[0]) * i // steps
+            y = p0[1] + (p1[1] - p0[1]) * i // steps
+            pw._on_canvas_motion(FakeEvent(x=x, y=y))
+        pw._on_canvas_release(FakeEvent(x=p1[0], y=p1[1]))
+
+    # ── 텍스트: 기본 ──────────────────────────────────────
+    def test_text_create_undo_removes_it(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        self.assertEqual(len(pages[0]["annots"]), 1)
+        pw._undo()
+        self.assertEqual(len(pages[0]["annots"]), 0)
+
+    def test_text_create_undo_then_redo_recreates_it(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot_id = pages[0]["annots"][0]["id"]
+        pw._undo()
+        self.assertEqual(len(pages[0]["annots"]), 0)
+        pw._redo()
+        self.assertEqual(len(pages[0]["annots"]), 1)
+        self.assertEqual(pages[0]["annots"][0]["id"], annot_id)
+
+    def test_text_delete_undo_restores_it(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot = pages[0]["annots"][0]
+        annot["text"] = "복구될 텍스트"
+        pw._select_annot(annot["id"])
+        pw._delete_selected_annot()
+        self.assertEqual(len(pages[0]["annots"]), 0)
+        pw._undo()
+        self.assertEqual(len(pages[0]["annots"]), 1)
+        self.assertEqual(pages[0]["annots"][0]["text"], "복구될 텍스트")
+
+    def test_text_delete_undo_then_redo_removes_again(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot = pages[0]["annots"][0]
+        pw._select_annot(annot["id"])
+        pw._delete_selected_annot()
+        pw._undo()
+        self.assertEqual(len(pages[0]["annots"]), 1)
+        pw._redo()
+        self.assertEqual(len(pages[0]["annots"]), 0)
+
+    def test_text_move_undo_restores_position(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot = pages[0]["annots"][0]
+        x0, y0 = annot["x"], annot["y"]
+        self._drag_move(pw, (300, 300), (420, 360))
+        self.assertNotEqual((annot["x"], annot["y"]), (x0, y0))
+        pw._undo()
+        annot = pages[0]["annots"][0]   # undo 로 리스트가 새 객체로 교체되므로 다시 조회
+        self.assertEqual(annot["x"], x0)
+        self.assertEqual(annot["y"], y0)
+
+    def test_text_move_undo_then_redo_restores_moved_position(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot = pages[0]["annots"][0]
+        self._drag_move(pw, (300, 300), (420, 360))
+        x_moved, y_moved = annot["x"], annot["y"]
+        pw._undo()
+        pw._redo()
+        annot = pages[0]["annots"][0]   # undo/redo 로 리스트가 교체되므로 다시 조회
+        self.assertEqual(annot["x"], x_moved)
+        self.assertEqual(annot["y"], y_moved)
+
+    def test_continuous_drag_produces_only_one_undo_step(self):
+        """여러 모션 이벤트를 거치는 드래그 하나가 Undo 스택에 여러 개
+        쌓이면 안 되고 정확히 1개만 쌓여야 한다(요구사항 5번)."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        n_before = len(pw._undo_stack)
+        self._drag_move(pw, (300, 300), (420, 360))
+        self.assertEqual(len(pw._undo_stack), n_before + 1)
+
+    def test_click_without_moving_does_not_push_undo_entry(self):
+        """드래그 없이 단순히 클릭만 해서 선택하는 것은 실행취소 스택에
+        아무것도 남기면 안 된다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._select_annot(None)
+        n_before = len(pw._undo_stack)
+        pw._set_tool("select")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))   # 드래그 없이 클릭만
+        pw._on_canvas_release(FakeEvent(x=300, y=300))
+        self.assertEqual(len(pw._undo_stack), n_before)
+
+    def test_text_property_change_undo_restores(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot = pages[0]["annots"][0]
+        panel = pw.prop_panel
+        orig_size = annot["font_size"]
+        panel.size_var.set(f"{orig_size + 10:.2f}")
+        panel._apply_size()
+        self.assertEqual(annot["font_size"], orig_size + 10)
+        pw._undo()
+        annot = pages[0]["annots"][0]   # undo 로 리스트가 새 객체로 교체되므로 다시 조회
+        self.assertEqual(annot["font_size"], orig_size)
+
+    def test_text_property_change_undo_then_redo(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot = pages[0]["annots"][0]
+        panel = pw.prop_panel
+        orig_size = annot["font_size"]
+        panel.size_var.set(f"{orig_size + 10:.2f}")
+        panel._apply_size()
+        pw._undo()
+        self.assertEqual(pages[0]["annots"][0]["font_size"], orig_size)
+        pw._redo()
+        self.assertEqual(pages[0]["annots"][0]["font_size"], orig_size + 10)
+
+    def test_repeated_apply_with_unchanged_value_does_not_stack_extra_undo(self):
+        """Enter 로 값을 확정한 뒤 포커스 아웃으로 같은 값이 한 번 더
+        적용되는 것처럼, 값이 실제로 바뀌지 않은 재호출은 Undo 스택에
+        추가로 쌓이면 안 된다(요구사항 6번)."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        panel = pw.prop_panel
+        panel.size_var.set("30.00")
+        panel._apply_size()                 # 실제 변경 → 스냅샷 1개
+        n_after_first = len(pw._undo_stack)
+        panel.size_var.set("30.00")
+        panel._apply_size()                 # 값 동일 → 추가 스냅샷 없어야 함
+        panel._apply_size()                 # 한 번 더 반복해도 마찬가지
+        self.assertEqual(len(pw._undo_stack), n_after_first)
+
+    def test_paste_creates_undoable_annotation(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        orig = pages[0]["annots"][0]
+        pw._select_annot(orig["id"])
+        pw._copy_selected_annot()
+        pw._paste_annot()
+        self.assertEqual(len(pages[0]["annots"]), 2)
+        pw._undo()
+        self.assertEqual(len(pages[0]["annots"]), 1)
+        self.assertEqual(pages[0]["annots"][0]["id"], orig["id"])
+        pw._redo()
+        self.assertEqual(len(pages[0]["annots"]), 2)
+
+    # ── 도형: 생성 ────────────────────────────────────────
+    def test_rect_create_undo_removes_it(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (450, 400))
+        self.assertEqual(len(pages[0]["annots"]), 1)
+        pw._undo()
+        self.assertEqual(len(pages[0]["annots"]), 0)
+
+    def test_arrow_create_undo_removes_it(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "arrow", (300, 300), (450, 400))
+        self.assertEqual(len(pages[0]["annots"]), 1)
+        pw._undo()
+        self.assertEqual(len(pages[0]["annots"]), 0)
+
+    def test_highlight_create_undo_removes_it(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "highlight", (300, 300), (450, 400))
+        self.assertEqual(len(pages[0]["annots"]), 1)
+        pw._undo()
+        self.assertEqual(len(pages[0]["annots"]), 0)
+
+    def test_shape_create_undo_then_redo_for_each_type(self):
+        for tool in ("rect", "arrow", "highlight"):
+            with self.subTest(tool=tool):
+                pages = self._make_pages()
+                pw = self._open_preview(pages)
+                self._drag_create(pw, tool, (300, 300), (450, 400))
+                aid = pages[0]["annots"][0]["id"]
+                pw._undo()
+                self.assertEqual(len(pages[0]["annots"]), 0)
+                pw._redo()
+                self.assertEqual(len(pages[0]["annots"]), 1)
+                self.assertEqual(pages[0]["annots"][0]["id"], aid)
+
+    # ── 도형: 이동/리사이즈/속성 ───────────────────────────
+    def test_shape_move_undo_restores_position(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (450, 400))
+        annot = pages[0]["annots"][0]
+        before = (annot["x0"], annot["y0"], annot["x1"], annot["y1"])
+        self._drag_move(pw, (375, 350), (430, 390))   # 사각형 내부를 눌러 이동
+        self.assertNotEqual(
+            (annot["x0"], annot["y0"], annot["x1"], annot["y1"]), before)
+        pw._undo()
+        annot = pages[0]["annots"][0]   # undo 로 리스트가 새 객체로 교체되므로 다시 조회
+        self.assertEqual(
+            (annot["x0"], annot["y0"], annot["x1"], annot["y1"]), before)
+
+    def test_shape_move_undo_then_redo(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (450, 400))
+        annot = pages[0]["annots"][0]
+        self._drag_move(pw, (375, 350), (430, 390))
+        moved = (annot["x0"], annot["y0"], annot["x1"], annot["y1"])
+        pw._undo()
+        pw._redo()
+        annot = pages[0]["annots"][0]
+        self.assertEqual(
+            (annot["x0"], annot["y0"], annot["x1"], annot["y1"]), moved)
+
+    def test_shape_resize_undo_restores_size(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (450, 400))
+        annot = pages[0]["annots"][0]
+        pw._select_annot(annot["id"])
+        before = (annot["x0"], annot["y0"], annot["x1"], annot["y1"])
+        sx1, sy1 = pt.pdf_to_screen(annot["x1"], annot["y1"], pw._cur_pw, pw._cur_ph,
+                                     pw._cur_rot, pw._sc, pw._cx, pw._cy)
+        pw._on_canvas_press(FakeEvent(x=int(sx1), y=int(sy1)))
+        for i in range(1, 6):
+            pw._on_canvas_motion(FakeEvent(x=int(sx1) + 8*i, y=int(sy1) + 8*i))
+        pw._on_canvas_release(FakeEvent(x=int(sx1) + 40, y=int(sy1) + 40))
+        self.assertNotEqual(
+            (annot["x0"], annot["y0"], annot["x1"], annot["y1"]), before)
+        pw._undo()
+        annot = pages[0]["annots"][0]   # undo 로 리스트가 새 객체로 교체되므로 다시 조회
+        self.assertEqual(
+            (annot["x0"], annot["y0"], annot["x1"], annot["y1"]), before)
+
+    def test_continuous_resize_produces_only_one_undo_step(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (450, 400))
+        annot = pages[0]["annots"][0]
+        pw._select_annot(annot["id"])
+        n_before = len(pw._undo_stack)
+        sx1, sy1 = pt.pdf_to_screen(annot["x1"], annot["y1"], pw._cur_pw, pw._cur_ph,
+                                     pw._cur_rot, pw._sc, pw._cx, pw._cy)
+        pw._on_canvas_press(FakeEvent(x=int(sx1), y=int(sy1)))
+        for i in range(1, 6):
+            pw._on_canvas_motion(FakeEvent(x=int(sx1) + 8*i, y=int(sy1) + 8*i))
+        pw._on_canvas_release(FakeEvent(x=int(sx1) + 40, y=int(sy1) + 40))
+        self.assertEqual(len(pw._undo_stack), n_before + 1)
+
+    def test_shape_property_change_undo_restores(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (450, 400))
+        panel = pw.shape_panel
+        panel.line_width_var.set("6.0")
+        panel._apply_line_width()
+        self.assertEqual(pages[0]["annots"][0]["line_width"], 6.0)
+        pw._undo()
+        self.assertEqual(pages[0]["annots"][0]["line_width"],
+                          pt.DEFAULT_SHAPE_LINE_WIDTH)
+
+    def test_shape_property_change_undo_then_redo(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (450, 400))
+        panel = pw.shape_panel
+        panel.fill_enabled_var.set(True)
+        panel._apply_fill_enabled()
+        self.assertTrue(pages[0]["annots"][0]["fill_enabled"])
+        pw._undo()
+        self.assertFalse(pages[0]["annots"][0]["fill_enabled"])
+        pw._redo()
+        self.assertTrue(pages[0]["annots"][0]["fill_enabled"])
+
+    def test_shape_line_color_change_undo_restores(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (450, 400))
+        panel = pw.shape_panel
+        orig = pages[0]["annots"][0]["line_color"]
+        with patch("tkinter.colorchooser.askcolor", return_value=((0,0,0), "#00FF00")):
+            panel._pick_line_color()
+        self.assertEqual(pages[0]["annots"][0]["line_color"], "#00FF00")
+        pw._undo()
+        self.assertEqual(pages[0]["annots"][0]["line_color"], orig)
+
+    def test_shape_highlight_color_change_undo_restores(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "highlight", (300, 300), (450, 400))
+        panel = pw.shape_panel
+        orig = pages[0]["annots"][0]["fill_color"]
+        with patch("tkinter.colorchooser.askcolor", return_value=((0,0,0), "#123456")):
+            panel._pick_highlight_color()
+        self.assertEqual(pages[0]["annots"][0]["fill_color"], "#123456")
+        pw._undo()
+        self.assertEqual(pages[0]["annots"][0]["fill_color"], orig)
+
+    # ── 연속 작업 (여러 편집 후 역순 Undo) ───────────────────
+    def test_sequence_of_edits_undo_in_exact_reverse_order(self):
+        """생성 → 이동 → 크기변경 → 색상변경 → 회전 순서로 편집한 뒤,
+        Undo 를 반복하면 각 단계가 정확히 역순으로 복원되어야 한다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot = pages[0]["annots"][0]
+        panel = pw.prop_panel
+
+        x_created, y_created = annot["x"], annot["y"]
+        size_created = annot["font_size"]
+        color_created = annot["color"]
+        rot_created = annot["rotation"]
+
+        self._drag_move(pw, (300, 300), (400, 350))
+        x_moved, y_moved = annot["x"], annot["y"]
+
+        panel.size_var.set(f"{size_created + 20:.2f}")
+        panel._apply_size()
+        size_changed = annot["font_size"]
+
+        with patch("tkinter.colorchooser.askcolor", return_value=((0,0,0), "#00FF00")):
+            panel._pick_color()
+        color_changed = annot["color"]
+
+        panel.rot_var.set("45.0")
+        panel._apply_rotation()
+        rot_changed = annot["rotation"]
+
+        # 편집 직후 최종 상태 확인
+        self.assertEqual((annot["x"], annot["y"]), (x_moved, y_moved))
+        self.assertEqual(annot["font_size"], size_changed)
+        self.assertEqual(annot["color"], color_changed)
+        self.assertEqual(annot["rotation"], rot_changed)
+
+        # Undo 1: 회전 되돌리기 → 이동/크기/색상은 유지
+        pw._undo()
+        a = pages[0]["annots"][0]
+        self.assertEqual(a["rotation"], rot_created)
+        self.assertEqual(a["color"], color_changed)
+        self.assertEqual(a["font_size"], size_changed)
+        self.assertEqual((a["x"], a["y"]), (x_moved, y_moved))
+
+        # Undo 2: 색상 되돌리기
+        pw._undo()
+        a = pages[0]["annots"][0]
+        self.assertEqual(a["color"], color_created)
+        self.assertEqual(a["font_size"], size_changed)
+        self.assertEqual((a["x"], a["y"]), (x_moved, y_moved))
+
+        # Undo 3: 크기 되돌리기
+        pw._undo()
+        a = pages[0]["annots"][0]
+        self.assertEqual(a["font_size"], size_created)
+        self.assertEqual((a["x"], a["y"]), (x_moved, y_moved))
+
+        # Undo 4: 이동 되돌리기
+        pw._undo()
+        a = pages[0]["annots"][0]
+        self.assertEqual((a["x"], a["y"]), (x_created, y_created))
+
+        # Undo 5: 생성 자체를 되돌리기
+        pw._undo()
+        self.assertEqual(len(pages[0]["annots"]), 0)
+
+    # ── 새 편집 후 Redo 초기화 ───────────────────────────────
+    def test_new_edit_after_undo_clears_redo_stack(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))   # 생성 1
+        pw._undo()
+        self.assertEqual(len(pages[0]["annots"]), 0)
+        self.assertTrue(pw._redo_stack)   # redo 가능한 상태
+
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=350, y=350))   # 새로운 생성 2
+        self.assertFalse(pw._redo_stack, "새로운 편집 후에는 기존 redo 기록이 삭제되어야 함")
+
+        pw._redo()   # redo 스택이 비었으므로 아무 일도 없어야 함
+        self.assertEqual(len(pages[0]["annots"]), 1)   # 방금 만든 annot 하나만 그대로
+
+    # ── 깊은 복사 확인 ───────────────────────────────────────
+    def test_snapshot_is_independent_deep_copy(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot = pages[0]["annots"][0]
+        annot["text"] = "before"
+        panel = pw.prop_panel
+        panel.text_var.set("after")
+        panel._apply_text()   # 이 시점에 "before" 상태가 스냅샷으로 저장됨
+        # 스냅샷을 남긴 뒤 실제 annot 을 추가로 바꿔도 스냅샷 자체는 영향받지 않아야 함
+        annot["text"] = "corrupted-after-snapshot"
+        snapshot_annots = pw._undo_stack[-1]["annots"]
+        self.assertEqual(snapshot_annots[0]["text"], "before")
+        self.assertNotEqual(snapshot_annots[0]["text"], "corrupted-after-snapshot")
+
+    # ── Entry 포커스 충돌 ─────────────────────────────────────
+    def test_undo_guard_skips_when_focus_in_xy_entry(self):
+        """X/Y 입력창에 포커스가 있을 때는(Ctrl+C/V 와 동일한 규칙)
+        Ctrl+Z 바인딩의 가드가 _undo() 자체를 호출하지 않아야 한다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        x_before = pages[0]["annots"][0]["x"]
+        panel = pw.prop_panel
+        with patch.object(pw, "focus_get", return_value=panel.content_entry):
+            self.assertTrue(pw._focus_in_entry())
+            # 실제 키 바인딩(lambda e: None if self._focus_in_entry() else
+            # self._undo())과 동일한 가드 표현식을 그대로 재현해서, 포커스가
+            # Entry 에 있을 때 _undo() 호출 자체가 일어나지 않는지 확인한다.
+            None if pw._focus_in_entry() else pw._undo()
+        self.assertEqual(len(pages[0]["annots"]), 1)
+        self.assertEqual(pages[0]["annots"][0]["x"], x_before)
+
+    def test_redo_guard_skips_when_focus_in_entry(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._undo()
+        self.assertEqual(len(pages[0]["annots"]), 0)
+        panel = pw.prop_panel
+        with patch.object(pw, "focus_get", return_value=panel.content_entry):
+            self.assertTrue(pw._focus_in_entry())
+            None if pw._focus_in_entry() else pw._redo()
+        # 포커스가 Entry 에 있었으므로 redo 가 실행되지 않아 여전히 삭제된 상태여야 함
+        self.assertEqual(len(pages[0]["annots"]), 0)
+
+    def test_delete_guard_still_works_alongside_new_undo_bindings(self):
+        """Undo/Redo 를 추가하면서 기존 Delete 의 Entry 포커스 가드를
+        깨뜨리지 않았는지 회귀 확인."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._select_annot(pages[0]["annots"][0]["id"])
+        panel = pw.prop_panel
+        with patch.object(pw, "focus_get", return_value=panel.content_entry):
+            self.assertTrue(pw._focus_in_entry())
+            None if pw._focus_in_entry() else pw._delete_selected_annot()
+        self.assertEqual(len(pages[0]["annots"]), 1)
+
+    def test_undo_redo_key_bindings_are_registered(self):
+        """<Control-z>/<Control-Z>/<Control-y>/<Control-Y> 가 실제로
+        PreviewWin 에 바인딩되어 있는지 확인(내용 자체는 위 가드 테스트로
+        검증됨)."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        for seq in ("<Control-z>", "<Control-Z>", "<Control-y>", "<Control-Y>"):
+            self.assertTrue(pw.bind(seq), f"{seq} 바인딩이 등록되어 있어야 함")
+
+
+# ══════════════════════════════════════════════════════════
+#  Undo / Redo 실제 GUI 시나리오 (App → 정리 탭 → 미리보기 전체 경로)
+# ══════════════════════════════════════════════════════════
+class TestUndoRedoGUISmoke(unittest.TestCase):
+    """자동화된 유닛 테스트 외에, 실제 App()을 통해 만들어지는 위젯
+    트리(App → OrganizeTab → PreviewWin)를 그대로 사용해 요구된 전체
+    시나리오(PDF 열기 → 편집모드 → 텍스트 생성 → 이동 → Undo/Redo →
+    속성변경 → Undo → 도형 생성 → 이동 → Undo/Redo)를 수치로 검증한다.
+
+    주의: 이 Xvfb(창관리자 없음) 환경에서는 event_generate() 로 보내는
+    합성 키보드 이벤트가 실제 포커스 위젯까지 안정적으로 전달되지
+    않음을 사전에 직접 확인했다(기존 테스트들도 같은 이유로 <Enter>/
+    <Leave> 등 포인터 이벤트에 mock을 쓰는 것과 동일한 제약). 따라서
+    Ctrl+Z/Ctrl+Y 로 연결된 실제 메서드(_undo/_redo)를 직접 호출해
+    "키를 눌렀을 때 실행되는 동작"을 검증한다 — 바인딩 자체가 등록되어
+    있는지는 TestUndoRedo.test_undo_redo_key_bindings_are_registered
+    에서 별도로 확인한다."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_undoredo_smoke_")
+        cls.pdf_path = os.path.join(cls.tmpdir, "sample.pdf")
+        make_pdf(cls.pdf_path, sizes=((595.28, 841.89),))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_full_scenario_via_real_app_widget_tree(self):
+        app = pt.App()
+        app.withdraw()
+        self.addCleanup(app.destroy)
+
+        ot = app.tabs["organize"]
+        # 1. PDF 열기
+        ot._load_pdfs([self.pdf_path])
+        self.assertEqual(len(ot.pages), 1)
+
+        pw = pt.PreviewWin(app, ot.pages, 0, on_change=ot._on_preview_change)
+        pw.update_idletasks(); pw.geometry("1150x820+0+0"); pw.update(); pw._show()
+        self.addCleanup(pw.destroy)
+
+        # 2. 편집 모드
+        pw._toggle_edit()
+        self.assertTrue(pw.edit_mode)
+
+        # 3. 텍스트 생성
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        self.assertEqual(len(ot.pages[0]["annots"]), 1)
+        annot = ot.pages[0]["annots"][0]
+        x_created, y_created = annot["x"], annot["y"]
+
+        # 4. 텍스트 이동
+        pw._set_tool("select")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        for i in range(1, 6):
+            pw._on_canvas_motion(FakeEvent(x=300 + 24*i, y=300 + 12*i))
+        pw._on_canvas_release(FakeEvent(x=420, y=360))
+        x_moved, y_moved = annot["x"], annot["y"]
+        self.assertNotEqual((x_moved, y_moved), (x_created, y_created))
+
+        # 5. Ctrl+Z (= pw._undo())
+        pw._undo()
+        # 6. 위치가 원래대로 복구되는지 확인 (수치 검증)
+        a = ot.pages[0]["annots"][0]
+        self.assertEqual(a["x"], x_created)
+        self.assertEqual(a["y"], y_created)
+
+        # 7. Ctrl+Y (= pw._redo())
+        pw._redo()
+        # 8. 다시 이동된 위치로 복구되는지 확인 (수치 검증)
+        a = ot.pages[0]["annots"][0]
+        self.assertEqual(a["x"], x_moved)
+        self.assertEqual(a["y"], y_moved)
+
+        # 9. 속성 변경 (글자 크기)
+        panel = pw.prop_panel
+        size_before = a["font_size"]
+        panel.size_var.set(f"{size_before + 15:.2f}")
+        panel._apply_size()
+        self.assertEqual(ot.pages[0]["annots"][0]["font_size"], size_before + 15)
+
+        # 10. Ctrl+Z
+        pw._undo()
+        # 11. 기존 속성으로 복구되는지 확인
+        self.assertEqual(ot.pages[0]["annots"][0]["font_size"], size_before)
+
+        # 12. 도형 생성
+        pw._set_tool("rect")
+        pw._on_canvas_press(FakeEvent(x=300, y=500))
+        pw._on_canvas_motion(FakeEvent(x=420, y=560))
+        pw._on_canvas_release(FakeEvent(x=420, y=560))
+        self.assertEqual(len(ot.pages[0]["annots"]), 2)
+        rect = ot.pages[0]["annots"][1]
+        rect_before = (rect["x0"], rect["y0"], rect["x1"], rect["y1"])
+
+        # 13. 도형 이동
+        pw._set_tool("select")
+        sx0, sy0 = pt.pdf_to_screen(rect["x0"], rect["y0"], pw._cur_pw, pw._cur_ph,
+                                     pw._cur_rot, pw._sc, pw._cx, pw._cy)
+        sx1, sy1 = pt.pdf_to_screen(rect["x1"], rect["y1"], pw._cur_pw, pw._cur_ph,
+                                     pw._cur_rot, pw._sc, pw._cx, pw._cy)
+        mid_x, mid_y = int((sx0+sx1)/2), int((sy0+sy1)/2)
+        pw._on_canvas_press(FakeEvent(x=mid_x, y=mid_y))
+        for i in range(1, 6):
+            pw._on_canvas_motion(FakeEvent(x=mid_x + 6*i, y=mid_y + 6*i))
+        pw._on_canvas_release(FakeEvent(x=mid_x + 30, y=mid_y + 30))
+        rect_moved = (rect["x0"], rect["y0"], rect["x1"], rect["y1"])
+        self.assertNotEqual(rect_moved, rect_before)
+
+        # 14. Ctrl+Z
+        pw._undo()
+        r = ot.pages[0]["annots"][1]
+        self.assertEqual((r["x0"], r["y0"], r["x1"], r["y1"]), rect_before)
+
+        # 15. Ctrl+Y
+        pw._redo()
+        r = ot.pages[0]["annots"][1]
+        self.assertEqual((r["x0"], r["y0"], r["x1"], r["y1"]), rect_moved)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,7 @@ PDF 도구  ·  무료 · 오프라인 · 완전 로컬
   ▸ 정리 탭  : 드래그 정렬 · 체크박스 · 호버 툴바 · 미리보기 + 편집
   ▸ 변환 탭  : PDF → 이미지 / 이미지 → PDF
 """
-import sys, os, shutil, subprocess, threading, zipfile, math, tempfile
+import sys, os, shutil, subprocess, threading, zipfile, math, tempfile, copy
 
 VERSION = "20260831.0844"                       # 배포.bat 이 자동 업데이트
 GITHUB_REPO  = "Disziplin1/pdf-tool"
@@ -744,6 +744,8 @@ class TextPropPanel(tk.Frame):
 
     def _set_align(self, key):
         if self.annot is None: return
+        if self.annot.get("align", "left") == key: return
+        self.owner._push_undo()
         self.annot["align"] = key
         self._refresh_align_buttons()
         self.owner._on_annot_prop_changed()
@@ -840,9 +842,16 @@ class TextPropPanel(tk.Frame):
         return "break"
 
     # ── 각 필드 적용 (Enter / 포커스 아웃 시점에 반영) ───────
+    # 아래 _apply_*/_pick_* 들은 실제 값이 바뀔 때만 owner._push_undo() 로
+    # 실행취소 스냅샷을 남긴다 — Enter 로 확정한 뒤 포커스가 빠져나가면서
+    # <FocusOut> 이 같은 값으로 한 번 더 호출되는 등, 값이 그대로인 중복
+    # 호출에서 실행취소 스택에 빈 항목이 쌓이지 않도록 하기 위함이다.
     def _apply_text(self):
         if self.annot is None: return
-        self.annot["text"] = self.text_var.get()
+        new_text = self.text_var.get()
+        if new_text == self.annot.get("text", ""): return
+        self.owner._push_undo()
+        self.annot["text"] = new_text
         self.owner._on_annot_prop_changed()
 
     def _apply_xy(self):
@@ -856,8 +865,13 @@ class TextPropPanel(tk.Frame):
             return
         # 내부 저장은 항상 pt, 정밀도를 그대로 유지한다 (화면 표시만 반올림).
         # Y 는 입력창에 좌하단 원점 기준으로 표시되므로 내부 좌표로 되돌린다.
-        self.annot["x"] = mm_to_pt(x_mm)
-        self.annot["y"] = self._disp_mm_to_y_pt(y_mm)
+        new_x = mm_to_pt(x_mm)
+        new_y = self._disp_mm_to_y_pt(y_mm)
+        if new_x == self.annot["x"] and new_y == self.annot["y"]:
+            return
+        self.owner._push_undo()
+        self.annot["x"] = new_x
+        self.annot["y"] = new_y
         self.refresh_xy_only()
         self.owner._on_annot_prop_changed()
 
@@ -870,6 +884,10 @@ class TextPropPanel(tk.Frame):
             messagebox.showwarning("잘못된 값", "크기는 0보다 큰 숫자(pt)로 입력해주세요.", parent=self)
             self.size_var.set(f"{self.annot.get('font_size', DEFAULT_ANNOT_SIZE):.2f}")
             return
+        if size == self.annot.get("font_size", DEFAULT_ANNOT_SIZE):
+            self.size_var.set(f"{size:.2f}")
+            return
+        self.owner._push_undo()
         self.annot["font_size"] = size
         self.size_var.set(f"{size:.2f}")
         self.owner._on_annot_prop_changed()
@@ -883,19 +901,32 @@ class TextPropPanel(tk.Frame):
             self.rot_var.set(f"{self.annot.get('rotation', 0.0):.1f}")
             return
         rot = rot % 360
+        if rot == self.annot.get("rotation", 0.0):
+            self.rot_var.set(f"{rot:.1f}")
+            return
+        self.owner._push_undo()
         self.annot["rotation"] = rot
         self.rot_var.set(f"{rot:.1f}")
         self.owner._on_annot_prop_changed()
 
     def _apply_font(self):
         if self.annot is None: return
-        self.annot["font"] = self.font_var.get() or DEFAULT_ANNOT_FONT
+        new_font = self.font_var.get() or DEFAULT_ANNOT_FONT
+        if new_font == self.annot.get("font", DEFAULT_ANNOT_FONT): return
+        self.owner._push_undo()
+        self.annot["font"] = new_font
         self.owner._on_annot_prop_changed()
 
     def _apply_style(self):
         if self.annot is None: return
-        self.annot["bold"] = bool(self.bold_var.get())
-        self.annot["italic"] = bool(self.italic_var.get())
+        new_bold = bool(self.bold_var.get())
+        new_italic = bool(self.italic_var.get())
+        if (new_bold == bool(self.annot.get("bold", False))
+                and new_italic == bool(self.annot.get("italic", False))):
+            return
+        self.owner._push_undo()
+        self.annot["bold"] = new_bold
+        self.annot["italic"] = new_italic
         self.owner._on_annot_prop_changed()
 
     def _pick_color(self):
@@ -903,7 +934,8 @@ class TextPropPanel(tk.Frame):
         from tkinter import colorchooser
         cur = self.annot.get("color", DEFAULT_ANNOT_COLOR)
         _, hexcol = colorchooser.askcolor(color=cur, parent=self, title="텍스트 색상 선택")
-        if hexcol:
+        if hexcol and hexcol != cur:
+            self.owner._push_undo()
             self.annot["color"] = hexcol
             self.color_btn.config(bg=hexcol)
             self.owner._on_annot_prop_changed()
@@ -1062,6 +1094,10 @@ class ShapePropPanel(tk.Frame):
             messagebox.showwarning("잘못된 값", "X0/Y0/X1/Y1 은 숫자(mm)로 입력해주세요.", parent=self)
             self.refresh_xy_only()
             return
+        if (x0 == self.annot["x0"] and x1 == self.annot["x1"]
+                and y0 == self.annot["y0"] and y1 == self.annot["y1"]):
+            return
+        self.owner._push_undo()
         self.annot["x0"], self.annot["x1"] = x0, x1
         self.annot["y0"], self.annot["y1"] = y0, y1
         self.refresh_xy_only()
@@ -1076,12 +1112,17 @@ class ShapePropPanel(tk.Frame):
             messagebox.showwarning("잘못된 값", "굵기는 0보다 큰 숫자(pt)로 입력해주세요.", parent=self)
             self.line_width_var.set(f"{self.annot.get('line_width', DEFAULT_SHAPE_LINE_WIDTH):.1f}")
             return
+        if w == self.annot.get("line_width", DEFAULT_SHAPE_LINE_WIDTH): return
+        self.owner._push_undo()
         self.annot["line_width"] = w
         self.owner._on_annot_prop_changed()
 
     def _apply_fill_enabled(self):
         if self.annot is None: return
-        self.annot["fill_enabled"] = bool(self.fill_enabled_var.get())
+        new_val = bool(self.fill_enabled_var.get())
+        if new_val == bool(self.annot.get("fill_enabled", False)): return
+        self.owner._push_undo()
+        self.annot["fill_enabled"] = new_val
         self.owner._on_annot_prop_changed()
 
     def _pick_line_color(self):
@@ -1089,7 +1130,8 @@ class ShapePropPanel(tk.Frame):
         from tkinter import colorchooser
         cur = self.annot.get("line_color", DEFAULT_SHAPE_LINE_COLOR)
         _, hexcol = colorchooser.askcolor(color=cur, parent=self, title="선 색상 선택")
-        if hexcol:
+        if hexcol and hexcol != cur:
+            self.owner._push_undo()
             self.annot["line_color"] = hexcol
             self.line_color_btn.config(bg=hexcol)
             self.owner._on_annot_prop_changed()
@@ -1099,7 +1141,8 @@ class ShapePropPanel(tk.Frame):
         from tkinter import colorchooser
         cur = self.annot.get("fill_color", DEFAULT_SHAPE_FILL_COLOR)
         _, hexcol = colorchooser.askcolor(color=cur, parent=self, title="채움 색상 선택")
-        if hexcol:
+        if hexcol and hexcol != cur:
+            self.owner._push_undo()
             self.annot["fill_color"] = hexcol
             self.fill_color_btn.config(bg=hexcol)
             self.owner._on_annot_prop_changed()
@@ -1109,7 +1152,8 @@ class ShapePropPanel(tk.Frame):
         from tkinter import colorchooser
         cur = self.annot.get("fill_color", DEFAULT_HIGHLIGHT_COLOR)
         _, hexcol = colorchooser.askcolor(color=cur, parent=self, title="강조 색상 선택")
-        if hexcol:
+        if hexcol and hexcol != cur:
+            self.owner._push_undo()
             self.annot["fill_color"] = hexcol
             self.highlight_color_btn.config(bg=hexcol)
             self.owner._on_annot_prop_changed()
@@ -1144,6 +1188,17 @@ class PreviewWin(tk.Toplevel):
         self._shape_draft = None     # 드래그로 도형을 새로 그리는 중인 상태(미리보기용)
         self._resize_state = None    # 핸들을 드래그해 도형 크기/끝점을 조정 중인 상태
         self._clipboard_annot = None # Ctrl+C 로 복사해둔 annot (텍스트/도형 공통)
+        # ── Undo / Redo (annotation 편집 전용) ────────────────
+        # 스택의 각 항목은 {"page_idx": int, "annots": [...]} 형태로,
+        # 실제 변경(생성/삭제/이동/리사이즈/속성변경) 직전의 해당 페이지
+        # annots 리스트를 깊은 복사해 담는다 (원본과 절대 공유되지 않음).
+        self._undo_stack = []
+        self._redo_stack = []
+        self._UNDO_LIMIT = 200   # 무한정 쌓이는 것만 방지하는 안전장치
+        # 드래그로 이동/리사이즈할 때는 모션 이벤트마다가 아니라, 실제로
+        # 처음 좌표가 바뀌는 그 순간에만 스냅샷 1개를 남기기 위한 플래그.
+        self._move_snapshot_pending = False
+        self._resize_snapshot_pending = False
         # ── 이동(팬) 도구 — 버튼 토글 또는 스페이스바로 임시 활성화 ──
         self._pan_active     = False # 팬 도구가 (버튼/스페이스 무엇으로든) 켜져 있는지
         self._tool_before_pan = "select"  # 팬을 끌 때 되돌아갈 이전 도구
@@ -1206,6 +1261,13 @@ class PreviewWin(tk.Toplevel):
         self.bind("<Control-C>",  lambda e: None if self._focus_in_entry() else self._copy_selected_annot())
         self.bind("<Control-v>",  lambda e: None if self._focus_in_entry() else self._paste_annot())
         self.bind("<Control-V>",  lambda e: None if self._focus_in_entry() else self._paste_annot())
+        # Ctrl+Z/Y 로 annotation 편집 실행취소/다시실행. X/Y 등 입력창에
+        # 포커스가 있을 때는(Ctrl+C/V 와 동일한 규칙) 가로채지 않아 그
+        # 입력창 자체의 기본 동작이 우선되게 한다.
+        self.bind("<Control-z>",  lambda e: None if self._focus_in_entry() else self._undo())
+        self.bind("<Control-Z>",  lambda e: None if self._focus_in_entry() else self._undo())
+        self.bind("<Control-y>",  lambda e: None if self._focus_in_entry() else self._redo())
+        self.bind("<Control-Y>",  lambda e: None if self._focus_in_entry() else self._redo())
         # 스페이스바: 누르고 있는 동안 임시로 팬(이동) 도구로 전환, 떼면 원래
         # 도구로 복귀. 이미 팬 버튼으로 켜둔 상태라면 한 번 눌렀다 떼는 것만
         # 으로 팬을 끈다(버튼을 다시 누르는 것과 동일한 효과).
@@ -1474,6 +1536,9 @@ class PreviewWin(tk.Toplevel):
             handle = self._handle_hit_test(e.x, e.y)
             if handle is not None:
                 self._resize_state = handle
+                # 실제로 크기가 바뀌기 시작하는 첫 모션 이벤트에서만 실행취소
+                # 스냅샷을 남긴다(클릭만 하고 끝나면 스냅샷 자체가 필요 없음).
+                self._resize_snapshot_pending = True
                 return
             hit = self._hit_test(e.x, e.y)
             if hit is not None:
@@ -1488,6 +1553,9 @@ class PreviewWin(tk.Toplevel):
                         "off_x": ref_x - px_pdf,
                         "off_y": ref_y - py_pdf,
                     }
+                    # 리사이즈와 동일하게, 실제로 위치가 바뀌기 시작하는 첫
+                    # 모션 이벤트에서만 스냅샷 1개를 남긴다.
+                    self._move_snapshot_pending = True
                 return
             else:
                 self._select_annot(None)
@@ -1514,10 +1582,12 @@ class PreviewWin(tk.Toplevel):
             return
         if self._resize_state is not None:
             self._resize_state = None
+            self._resize_snapshot_pending = False
             if self.on_change: self.on_change()
             return
         if self._move_state is not None:
             self._move_state = None
+            self._move_snapshot_pending = False
             if self.on_change: self.on_change()
             return
         self._pan_end(e)
@@ -1567,6 +1637,7 @@ class PreviewWin(tk.Toplevel):
             annot = {"id": next(_id_gen), "type": "arrow",
                      "x0": x0_pt, "y0": y0_pt, "x1": x1_pt, "y1": y1_pt,
                      "line_color": DEFAULT_SHAPE_LINE_COLOR, "line_width": DEFAULT_SHAPE_LINE_WIDTH}
+        self._push_undo()
         pg.setdefault("annots", []).append(annot)
         self._select_annot(annot["id"])
         if self.on_change: self.on_change()
@@ -1710,6 +1781,57 @@ class PreviewWin(tk.Toplevel):
         w = self.focus_get()
         return isinstance(w, (tk.Entry, tk.Spinbox, tk.Text, ttk.Entry, ttk.Combobox))
 
+    # ── Undo / Redo (annotation 편집 전용) ────────────────────
+    def _push_undo(self):
+        """실제 변경(생성/삭제/이동/리사이즈/속성변경) 직전에 한 번만
+        호출한다. 현재 페이지의 annots 를 깊은 복사해 실행취소 스택에
+        쌓고, 새로운 편집이 시작된 것이므로 redo 스택은 비운다(일반적인
+        편집기와 동일한 규칙)."""
+        pg = self.pages[self.idx]
+        self._undo_stack.append({
+            "page_idx": self.idx,
+            "annots": copy.deepcopy(pg.get("annots", [])),
+        })
+        if len(self._undo_stack) > self._UNDO_LIMIT:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+
+    def _restore_snapshot(self, entry):
+        """스냅샷을 실제 페이지에 되돌리고 화면/속성패널을 갱신한다."""
+        idx = entry["page_idx"]
+        if not (0 <= idx < len(self.pages)):
+            return
+        self.pages[idx]["annots"] = entry["annots"]
+        self.idx = idx
+        sel = self.selected_id
+        still_exists = sel is not None and any(
+            a["id"] == sel for a in self.pages[idx].get("annots", []))
+        if not still_exists:
+            self.selected_id = None
+        self._show()
+        self._select_annot(self.selected_id)
+        if self.on_change: self.on_change()
+
+    def _undo(self):
+        if not self._undo_stack: return
+        cur_pg = self.pages[self.idx]
+        self._redo_stack.append({
+            "page_idx": self.idx,
+            "annots": copy.deepcopy(cur_pg.get("annots", [])),
+        })
+        entry = self._undo_stack.pop()
+        self._restore_snapshot(entry)
+
+    def _redo(self):
+        if not self._redo_stack: return
+        cur_pg = self.pages[self.idx]
+        self._undo_stack.append({
+            "page_idx": self.idx,
+            "annots": copy.deepcopy(cur_pg.get("annots", [])),
+        })
+        entry = self._redo_stack.pop()
+        self._restore_snapshot(entry)
+
     # ── annot(텍스트) 선택/생성/이동/삭제 ─────────────────────
     # ── 도형 크기/끝점 조정 핸들 ────────────────────────────
     HANDLE_R = 6   # 핸들 히트테스트 반경(px)
@@ -1740,6 +1862,9 @@ class PreviewWin(tk.Toplevel):
         if self._sc is None or self._resize_state is None: return
         a = self._find_annot(self._resize_state["annot_id"])
         if a is None: return
+        if self._resize_snapshot_pending:
+            self._push_undo()
+            self._resize_snapshot_pending = False
         handle = self._resize_state["handle"]
         x_pt, y_pt = screen_to_pdf(e.x, e.y, self._cur_pw, self._cur_ph,
                                     self._cur_rot, self._sc, self._cx, self._cy)
@@ -1839,6 +1964,7 @@ class PreviewWin(tk.Toplevel):
             "color": DEFAULT_ANNOT_COLOR, "bold": False, "italic": False,
             "align": "left", "rotation": 0.0,
         }
+        self._push_undo()
         pg.setdefault("annots", []).append(annot)
         self._select_annot(annot["id"])
         self.prop_panel.focus_content_for_edit()
@@ -1852,6 +1978,9 @@ class PreviewWin(tk.Toplevel):
         if self._sc is None or self._move_state is None: return
         a = self._find_annot(self._move_state["annot_id"])
         if a is None: return
+        if self._move_snapshot_pending:
+            self._push_undo()
+            self._move_snapshot_pending = False
         px_pdf, py_pdf = screen_to_pdf(e.x, e.y, self._cur_pw, self._cur_ph,
                                         self._cur_rot, self._sc, self._cx, self._cy)
         ref_x = px_pdf + self._move_state["off_x"]
@@ -1864,6 +1993,7 @@ class PreviewWin(tk.Toplevel):
     def _delete_selected_annot(self, e=None):
         if self.selected_id is None: return
         pg = self.pages[self.idx]
+        self._push_undo()
         pg["annots"] = [a for a in pg.get("annots", []) if a["id"] != self.selected_id]
         self.selected_id = None
         self.prop_panel.pack_forget()
@@ -1888,6 +2018,7 @@ class PreviewWin(tk.Toplevel):
         pg = self.pages[self.idx]
         new_annot = dict(self._clipboard_annot)
         new_annot["id"] = next(_id_gen)
+        self._push_undo()
         pg.setdefault("annots", []).append(new_annot)
         self._select_annot(new_annot["id"])
         if self.on_change: self.on_change()
