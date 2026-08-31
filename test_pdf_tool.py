@@ -1482,13 +1482,14 @@ class TestUsabilityImprovements(unittest.TestCase):
 
     def test_prop_panels_nested_inside_fixed_width_holder_not_main_split(self):
         """텍스트/도형 속성 패널은 캔버스와 폭을 나눠 갖는 mid 프레임에
-        직접 들어가는 게 아니라, 항상 자리를 차지하는 고정폭 holder 안에
-        중첩되어 있어야 한다 — 그래야 패널을 pack()/pack_forget() 해도
-        캔버스 폭(cf)에는 영향이 없다."""
+        직접 들어가는 게 아니라, 항상 자리를 차지하는 고정폭 holder(그
+        안의 고정높이 prop_zone) 안에 중첩되어 있어야 한다 — 그래야
+        패널을 pack()/pack_forget() 해도 캔버스 폭(cf)에는 영향이 없다."""
         pages = self._make_pages()
         pw, annot = self._open_preview_with_text(pages)
-        self.assertIs(pw.prop_panel.master, pw.side_panel_holder)
-        self.assertIs(pw.shape_panel.master, pw.side_panel_holder)
+        self.assertIs(pw.prop_panel.master, pw.prop_zone)
+        self.assertIs(pw.shape_panel.master, pw.prop_zone)
+        self.assertIs(pw.prop_zone.master, pw.side_panel_holder)
         self.assertIs(pw.side_panel_holder.master, pw.preview_cf)
 
     def test_side_panel_holder_unpacked_when_leaving_edit_mode(self):
@@ -3377,6 +3378,41 @@ class TestLayerListPanel(unittest.TestCase):
         pw.update_idletasks()
         self.assertLess(pw.prop_panel.winfo_height(), pw.side_panel_holder.winfo_height())
         self.assertGreater(pw.layer_panel.winfo_height(), 0)
+
+    def test_layer_panel_position_is_stable_across_selection_types(self):
+        """텍스트 속성 패널(필드 많음)과 도형 속성 패널(필드 적음)의
+        실제 높이가 서로 달라도, 그 자리(prop_zone)가 고정 높이라 레이어
+        목록이 시작하는 위치(y 좌표)는 항상 같아야 한다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw.update_idletasks()
+        y_with_text = pw.layer_panel.winfo_y()
+
+        self._drag_create(pw, "rect", (300, 400), (400, 480))
+        pw.update_idletasks()
+        y_with_shape = pw.layer_panel.winfo_y()
+
+        pw._select_annot(None)
+        pw.update_idletasks()
+        y_with_none = pw.layer_panel.winfo_y()
+
+        self.assertEqual(y_with_text, y_with_shape)
+        self.assertEqual(y_with_text, y_with_none)
+
+    def test_prop_zone_height_fixed_regardless_of_child_content(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        h_before = pw.prop_zone.winfo_reqheight()
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw.update_idletasks()
+        self.assertEqual(pw.prop_zone.winfo_height(), h_before)
+        self._drag_create(pw, "rect", (300, 400), (400, 480))
+        pw.update_idletasks()
+        self.assertEqual(pw.prop_zone.winfo_height(), h_before)
 
     # ── 목록 내용 ────────────────────────────────────────
     def test_layer_list_shows_newest_first(self):

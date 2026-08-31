@@ -1467,11 +1467,26 @@ class PreviewWin(tk.Toplevel):
         # 없앤다 (편집모드 진입/이탈 시에만 한 번 자리를 잡는다).
         self.side_panel_holder = tk.Frame(mid, bg=BG, width=230)
         self.side_panel_holder.pack_propagate(False)
-        self.prop_panel  = TextPropPanel(self.side_panel_holder, owner=self)
-        self.shape_panel = ShapePropPanel(self.side_panel_holder, owner=self)
-        # 레이어 목록은 속성 패널 아래 남는 공간을 항상 채운다(선택 여부와
-        # 무관하게 편집모드에서 계속 표시) — 속성 패널은 side="top", fill="x"
-        # 로만 필요한 만큼의 높이만 차지하도록 바뀌어야 이 공간이 생긴다.
+
+        # 속성 패널이 들어갈 자리를 고정 높이로 미리 확보한다. 텍스트
+        # 속성 패널(글꼴/크기/색상/정렬/회전 등 필드가 많음)과 도형 속성
+        # 패널(위치·크기/선/채움만 있어 필드가 적음)의 실제 높이가 서로
+        # 달라서, 그냥 "필요한 만큼만" 차지하게 두면 무엇을 선택하느냐에
+        # 따라 그 아래 레이어 목록이 매번 위아래로 튀는 문제가 있었다.
+        # 둘 중 더 큰 높이로 이 자리 자체를 고정해서, 무엇을 선택하든
+        # (또는 아무것도 선택 안 하든) 레이어 목록이 항상 같은 위치에서
+        # 시작하게 한다.
+        self.prop_zone = tk.Frame(self.side_panel_holder, bg=BG)
+        self.prop_zone.pack(side="top", fill="x")
+        self.prop_panel  = TextPropPanel(self.prop_zone, owner=self)
+        self.shape_panel = ShapePropPanel(self.prop_zone, owner=self)
+        self.prop_zone.update_idletasks()
+        prop_h = max(self.prop_panel.winfo_reqheight(), self.shape_panel.winfo_reqheight())
+        self.prop_zone.config(height=prop_h)
+        self.prop_zone.pack_propagate(False)
+
+        # 레이어 목록은 그 아래 남는 공간을 항상 채운다(선택 여부와 무관
+        # 하게 편집모드에서 계속 표시).
         self.layer_panel = LayerListPanel(self.side_panel_holder, owner=self)
         self.layer_panel.pack(side="bottom", fill="both", expand=True)
 
