@@ -3405,26 +3405,35 @@ class TestLayerListPanel(unittest.TestCase):
         except pt.tk.TclError:
             return False
 
-    def test_layer_panel_fills_whole_column_when_nothing_selected(self):
-        """아무것도 선택 안 했을 때는 속성 패널 자리(prop_zone) 자체가
-        아예 없어져서, 레이어 목록이 오른쪽 칸 맨 위(y=0)부터 채워야
-        한다 — 빈 속성 패널 칸이 떠 있는 어색함을 없애기 위함."""
+    def test_layer_panel_position_fixed_regardless_of_selection_state(self):
+        """아무것도 선택 안 했을 때도 속성 패널 자리(prop_zone)는 항상 그
+        자리를 차지한 채 흰 배경으로 남아있어야 하고, 레이어 목록의
+        위치는 아무것도/텍스트/도형 중 무엇을 선택하든 항상 동일해야
+        한다 — 선택할 때마다 레이어 목록이 위아래로 움직이는 불편을
+        없애기 위함."""
         pages = self._make_pages()
         pw = self._open_preview(pages)
         pw.update_idletasks()
-        self.assertEqual(pw.layer_panel.winfo_y(), 0)
-        self.assertFalse(self._is_packed(pw.prop_zone))
+        self.assertTrue(self._is_packed(pw.prop_zone))
+        y_with_none = pw.layer_panel.winfo_y()
 
         pw._set_tool("text")
         pw._on_canvas_press(FakeEvent(x=300, y=300))
         pw.update_idletasks()
         self.assertTrue(self._is_packed(pw.prop_zone))
-        self.assertGreater(pw.layer_panel.winfo_y(), 0)
+        y_with_text = pw.layer_panel.winfo_y()
+        self.assertEqual(y_with_none, y_with_text)
+
+        self._drag_create(pw, "rect", (300, 400), (400, 480))
+        pw.update_idletasks()
+        self.assertTrue(self._is_packed(pw.prop_zone))
+        y_with_shape = pw.layer_panel.winfo_y()
+        self.assertEqual(y_with_none, y_with_shape)
 
         pw._select_annot(None)
         pw.update_idletasks()
-        self.assertEqual(pw.layer_panel.winfo_y(), 0)
-        self.assertFalse(self._is_packed(pw.prop_zone))
+        self.assertTrue(self._is_packed(pw.prop_zone))
+        self.assertEqual(pw.layer_panel.winfo_y(), y_with_none)
 
     def test_prop_zone_height_fixed_regardless_of_child_content(self):
         """텍스트가 선택됐을 때와 도형이 선택됐을 때 prop_zone 의 실제

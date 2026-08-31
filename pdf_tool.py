@@ -1854,9 +1854,8 @@ class PreviewWin(tk.Toplevel):
             # 때마다 새로 자리를 만들면 그때마다 캔버스 폭이 바뀌어 PDF가
             # 좌우로 밀려 보이는 문제가 있었다.
             self.side_panel_holder.pack(side="right", fill="y")
-            # prop_zone(속성 패널 자리)은 선택된 게 있을 때만 보여야 하므로,
             # 편집모드에 막 들어온 시점의 선택 상태(보통 없음)에 맞춰
-            # 다시 한 번 반영해둔다.
+            # 속성 패널 내용을 다시 한 번 반영해둔다.
             self._select_annot(self.selected_id)
             self._set_tool(self.tool)
         else:
@@ -2104,6 +2103,12 @@ class PreviewWin(tk.Toplevel):
         annot = self._find_annot(aid) if aid is not None else None
         self.prop_panel.pack_forget()
         self.shape_panel.pack_forget()
+        # prop_zone(속성 패널 자리, 고정 높이·흰색 배경)은 선택 여부와
+        # 무관하게 항상 그대로 둔다 — 아무것도 선택 안 했을 때만 잠깐
+        # 없앴다가 선택하면 다시 나타나게 했더니, 그때마다 레이어 목록이
+        # 위아래로 훅 움직여서 오히려 더 불편했다. 항상 같은 자리를
+        # 차지하게 해서(선택 안 했을 때는 빈 흰 칸으로) 레이어 목록
+        # 위치를 완전히 고정한다.
         if annot is not None:
             pg = self._cur_page()
             panel = self.prop_panel if annot.get("type") == "text" else self.shape_panel
@@ -2111,14 +2116,6 @@ class PreviewWin(tk.Toplevel):
             # side="top", fill="x": 필요한 높이만 차지하고, 그 아래 남는
             # 공간은 레이어 목록(layer_panel, side="bottom")이 채운다.
             panel.pack(side="top", fill="x")
-            # 뭔가 선택됐을 때만 속성 패널 자리(prop_zone, 고정 높이)를
-            # 보여준다 — 텍스트/도형 사이에서는 이 자리가 고정 높이라
-            # 레이어 목록 위치가 흔들리지 않지만, 아무것도 선택 안 했을
-            # 때는 이 자리를 아예 없애서 레이어 목록이 오른쪽 칸 전체를
-            # 채우게 한다(빈 회색 칸만 떠 있는 게 보기 어색해서).
-            self.prop_zone.pack(side="top", fill="x")
-        else:
-            self.prop_zone.pack_forget()
         self._redraw_annots()
 
     def _on_annot_prop_changed(self):
