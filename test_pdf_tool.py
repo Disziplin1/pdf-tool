@@ -2135,6 +2135,51 @@ class TestShapeAnnots(unittest.TestCase):
         pw._select_annot(None)
         self.assertIsNone(pw._handle_hit_test(sx, sy))
 
+    # ── 흰 배경 위 흰 도형처럼 안 보이는 경우를 위한 편집용 점선 안내선 ──
+    def test_unselected_shape_shows_hint_outline_in_edit_mode(self):
+        """흰 배경에 흰 사각형처럼 실제 색이 안 보이는 도형도, 편집모드
+        에서는 옅은 점선 안내선으로 위치를 알아볼 수 있어야 한다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (450, 400))
+        a = pages[0]["annots"][0]
+        a["fill_enabled"] = True
+        a["fill_color"] = "#FFFFFF"
+        a["line_color"] = "#FFFFFF"
+        pw._select_annot(None)   # 선택 해제 상태에서도 안내선이 보여야 함
+        hint_items = pw.canvas.find_withtag("annothint")
+        self.assertTrue(hint_items, "선택되지 않은 도형에도 안내선이 그려져야 함")
+
+    def test_selected_shape_does_not_show_hint_outline(self):
+        """선택된 도형은 이미 강조색 점선(annotsel)이 보이므로, 중복으로
+        옅은 안내선(annothint)까지 그릴 필요는 없다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (450, 400))
+        a = pages[0]["annots"][0]
+        pw._select_annot(a["id"])
+        self.assertTrue(pw.canvas.find_withtag("annotsel"))
+        self.assertFalse(pw.canvas.find_withtag("annothint"))
+
+    def test_hint_outline_not_shown_outside_edit_mode(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (450, 400))
+        pw._select_annot(None)
+        self.assertTrue(pw.canvas.find_withtag("annothint"))
+        pw._toggle_edit()   # 편집모드 종료(보기 모드로)
+        self.assertFalse(pw.canvas.find_withtag("annothint"))
+
+    def test_hint_outline_shown_for_all_shape_types(self):
+        for tool in ("rect", "arrow", "highlight"):
+            with self.subTest(tool=tool):
+                pages = self._make_pages()
+                pw = self._open_preview(pages)
+                self._drag_create(pw, tool, (300, 300), (450, 400))
+                pw._select_annot(None)
+                self.assertTrue(pw.canvas.find_withtag("annothint"),
+                                 f"{tool} 도 안내선이 보여야 함")
+
 
 # ══════════════════════════════════════════════════════════
 #  8. 이미지 직접 불러오기(정리 탭) + jpg/png 로 내보내기
@@ -3229,6 +3274,236 @@ class TestUndoRedo(unittest.TestCase):
         pw = self._open_preview(pages)
         for seq in ("<Control-z>", "<Control-Z>", "<Control-y>", "<Control-Y>"):
             self.assertTrue(pw.bind(seq), f"{seq} 바인딩이 등록되어 있어야 함")
+
+    # ── 같은 페이지 안에서의 Undo/Redo 는 화면 깜빡임이 없어야 함 ──
+    def test_undo_on_same_page_does_not_trigger_full_page_rerender(self):
+        """Ctrl+Z/Y 를 누를 때마다 배경(PDF 비트맵)까지 통째로 다시
+        그리면(_show) 화면이 깜빡인다 — 같은 페이지 안에서의 되돌리기라면
+        annot 만 다시 그리는 가벼운 경로(_redraw_annots)만 타야 한다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+
+        show_calls = []
+        orig_show = pt.PreviewWin._show
+        def counting_show(self):
+            show_calls.append(1)
+            return orig_show(self)
+        with patch.object(pt.PreviewWin, "_show", counting_show):
+            photo_before = pw.photo
+            pw._undo()
+            pw._redo()
+
+        self.assertEqual(show_calls, [],
+            "같은 페이지 안에서의 Undo/Redo 는 _show() 를 호출하면 안 됨 — 깜빡임의 원인")
+        self.assertIs(pw.photo, photo_before,
+            "Undo/Redo 후에도 배경 PhotoImage 객체가 재생성되지 않아야 함")
+
+    def test_undo_across_pages_still_triggers_full_rerender(self):
+        """드문 경우지만, 다른 페이지에서 한 편집을 되돌리면 배경 자체가
+        바뀌어야 하므로 이때는 _show() 가 호출되는 게 맞다(회귀 방지)."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._go(1)   # 2페이지로 이동
+        self.assertEqual(pw.idx, 1)
+
+        show_calls = []
+        orig_show = pt.PreviewWin._show
+        def counting_show(self):
+            show_calls.append(1)
+            return orig_show(self)
+        with patch.object(pt.PreviewWin, "_show", counting_show):
+            pw._undo()   # 1페이지에서 만든 텍스트를 되돌림 -> 페이지 전환 필요
+
+        self.assertEqual(len(show_calls), 1)
+        self.assertEqual(pw.idx, 0)
+        self.assertEqual(len(pages[0]["annots"]), 0)
+
+
+# ══════════════════════════════════════════════════════════
+#  레이어 목록 패널 (속성 패널 아래, 포토샵 레이어 패널 스타일)
+# ══════════════════════════════════════════════════════════
+class TestLayerListPanel(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pt.TkinterDnD.Tk() if pt.DND_OK else pt.tk.Tk()
+        cls.root.withdraw()
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_layerlist_test_")
+        cls.pdf_path = os.path.join(cls.tmpdir, "sample.pdf")
+        make_pdf(cls.pdf_path, sizes=((595.28, 841.89), (595.28, 841.89)))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _make_pages(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        return ot.pages
+
+    def _open_preview(self, pages, start=0):
+        pw = pt.PreviewWin(self.root, pages, start)
+        pw.update_idletasks(); pw.geometry("1150x820+0+0"); pw.update(); pw._show()
+        self.addCleanup(pw.destroy)
+        pw._toggle_edit()
+        return pw
+
+    def _drag_create(self, pw, tool, p0, p1):
+        pw._set_tool(tool)
+        pw._on_canvas_press(FakeEvent(x=p0[0], y=p0[1]))
+        pw._on_canvas_motion(FakeEvent(x=p1[0], y=p1[1]))
+        pw._on_canvas_release(FakeEvent(x=p1[0], y=p1[1]))
+
+    # ── 레이아웃: 캔버스 폭에 영향 없이 오른쪽 칸 안에서만 위/아래로 나뉨 ──
+    def test_layer_panel_lives_inside_side_panel_holder_below_prop_panel(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self.assertIs(pw.layer_panel.master, pw.side_panel_holder)
+        self.assertEqual(pw.layer_panel.pack_info().get("side"), "bottom")
+
+    def test_prop_panel_no_longer_forced_to_full_height(self):
+        """예전에는 panel.pack(fill="y") 라서 속성 패널이 남는 공간을
+        전부 차지했는데, 이제는 필요한 높이만 차지해야 그 아래 레이어
+        목록이 보일 자리가 생긴다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw.update_idletasks()
+        self.assertLess(pw.prop_panel.winfo_height(), pw.side_panel_holder.winfo_height())
+        self.assertGreater(pw.layer_panel.winfo_height(), 0)
+
+    # ── 목록 내용 ────────────────────────────────────────
+    def test_layer_list_shows_newest_first(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        self._drag_create(pw, "rect", (300, 400), (400, 480))
+        items = list(pw.layer_panel.listbox.get(0, pt.tk.END))
+        self.assertEqual(len(items), 2)
+        self.assertTrue(items[0].startswith("사각형"))   # 나중에 만든 게 위
+        self.assertTrue(items[1].startswith("T"))
+
+    def test_layer_list_text_label_shows_content(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot = pages[0]["annots"][0]
+        panel = pw.prop_panel
+        panel.text_var.set("안녕하세요")
+        panel._apply_text()
+        items = list(pw.layer_panel.listbox.get(0, pt.tk.END))
+        self.assertIn("안녕하세요", items[0])
+
+    def test_layer_list_shape_labels_numbered_per_type(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (350, 350))
+        self._drag_create(pw, "rect", (300, 400), (350, 450))
+        self._drag_create(pw, "arrow", (300, 500), (350, 550))
+        items = list(pw.layer_panel.listbox.get(0, pt.tk.END))
+        # 최근 생성이 위: 화살표1, 사각형2, 사각형1
+        self.assertEqual(items, ["화살표 1", "사각형 2", "사각형 1"])
+
+    # ── 목록 클릭 → 캔버스 선택 ───────────────────────────
+    def test_clicking_layer_list_item_selects_annot_on_canvas(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        text_id = pages[0]["annots"][0]["id"]
+        self._drag_create(pw, "rect", (300, 400), (400, 480))
+        rect_id = pages[0]["annots"][1]["id"]
+        self.assertEqual(pw.selected_id, rect_id)   # 방금 만든 사각형이 선택된 상태
+
+        # 목록 맨 아래(텍스트) 항목을 클릭했다고 시뮬레이션
+        pw.layer_panel.listbox.selection_clear(0, pt.tk.END)
+        pw.layer_panel.listbox.selection_set(1)   # index 1 = 텍스트(더 오래된 것)
+        pw.layer_panel._on_listbox_select(None)
+        self.assertEqual(pw.selected_id, text_id)
+
+    # ── 캔버스 선택 → 목록 강조 (양방향) ──────────────────
+    def test_selecting_on_canvas_highlights_layer_list_row(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        text_id = pages[0]["annots"][0]["id"]
+        self._drag_create(pw, "rect", (300, 400), (400, 480))
+
+        pw._select_annot(text_id)
+        sel = pw.layer_panel.listbox.curselection()
+        self.assertEqual(len(sel), 1)
+        self.assertEqual(pw.layer_panel._ids_in_display_order[sel[0]], text_id)
+
+    def test_deselecting_clears_layer_list_highlight(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._select_annot(None)
+        self.assertEqual(pw.layer_panel.listbox.curselection(), ())
+
+    # ── 드래그로 순서(z-order) 바꾸기 ──────────────────────
+    def test_reorder_moves_annot_within_actual_annots_list(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        text_id = pages[0]["annots"][0]["id"]
+        self._drag_create(pw, "rect", (300, 400), (400, 480))
+        rect_id = pages[0]["annots"][1]["id"]
+        # 실제 리스트 순서: [text, rect] (뒤에 있을수록 위에 그려짐)
+        self.assertEqual([a["id"] for a in pages[0]["annots"]], [text_id, rect_id])
+
+        # 화면(목록)에는 [rect, text] 순으로 보임. rect(표시 0번)를
+        # 맨 아래(표시 1번)로 옮기면 -> 실제 리스트에서는 [rect, text] 로 뒤집힘
+        pw._reorder_annot(rect_id, 1)
+        self.assertEqual([a["id"] for a in pages[0]["annots"]], [rect_id, text_id])
+
+    def test_reorder_is_undoable(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        self._drag_create(pw, "rect", (300, 400), (400, 480))
+        before = [a["id"] for a in pages[0]["annots"]]
+        rect_id = pages[0]["annots"][1]["id"]
+        pw._reorder_annot(rect_id, 1)
+        self.assertNotEqual([a["id"] for a in pages[0]["annots"]], before)
+        pw._undo()
+        self.assertEqual([a["id"] for a in pages[0]["annots"]], before)
+
+    def test_reorder_to_same_position_is_noop(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        self._drag_create(pw, "rect", (300, 400), (400, 480))
+        rect_id = pages[0]["annots"][1]["id"]
+        n_before = len(pw._undo_stack)
+        pw._reorder_annot(rect_id, 0)   # 이미 맨 위(표시 0번)에 있음
+        self.assertEqual(len(pw._undo_stack), n_before)
+
+    # ── 여러 페이지: 목록은 현재 보고 있는 페이지 것만 보여줌 ────
+    def test_layer_list_reflects_current_page_only(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._go(1)
+        self.assertEqual(list(pw.layer_panel.listbox.get(0, pt.tk.END)), [])
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        items = list(pw.layer_panel.listbox.get(0, pt.tk.END))
+        self.assertEqual(len(items), 1)
 
 
 # ══════════════════════════════════════════════════════════

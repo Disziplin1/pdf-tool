@@ -581,7 +581,11 @@ class TextPropPanel(tk.Frame):
         self.owner = owner          # PreviewWin 인스턴스 (변경 통지용)
         self.annot = None
         self.page_h_pt = None       # Y 표시를 좌하단 원점으로 뒤집는 데 필요
-        self.pack_propagate(False)  # 내용과 무관하게 폭 고정
+        # 폭 고정은 부모 side_panel_holder 의 pack_propagate(False)+width=230
+        # 이 이미 책임지므로, 여기서는 걸지 않는다 — 여기서 걸면 내용과
+        # 무관하게 높이까지 고정돼버려(자식이 없는 시점 기준 높이로 굳음),
+        # side="top", fill="x" 로 패킹할 때 패널이 거의 안 보일 만큼
+        # 찌그러지는 문제가 있었다.
         self._build()
 
     def _build(self):
@@ -950,7 +954,8 @@ class ShapePropPanel(tk.Frame):
         self.owner = owner
         self.annot = None
         self.page_h_pt = None
-        self.pack_propagate(False)
+        # TextPropPanel 과 동일한 이유로 여기서는 pack_propagate(False) 를
+        # 걸지 않는다 — 폭 고정은 부모 side_panel_holder 가 책임진다.
         self._build()
 
     def _build(self):
@@ -1164,6 +1169,132 @@ class ShapePropPanel(tk.Frame):
 
 
 # ══════════════════════════════════════════════════════════
+#  레이어 목록 (속성 패널 아래 남는 공간, 포토샵 레이어 패널 스타일)
+#
+#  화면에 보이는 순서는 최근에 만든 게 위(=annots 리스트의 역순).
+#  클릭하면 캔버스에서 선택되고, 캔버스에서 선택해도 이 목록에서 강조
+#  표시된다(양방향 동기화). 드래그하면 겹치는 순서(z-order)도 바뀐다.
+# ══════════════════════════════════════════════════════════
+class LayerListPanel(tk.Frame):
+    def __init__(self, master, owner):
+        super().__init__(master, bg=PANEL)
+        self.owner = owner
+        self._ids_in_display_order = []   # 목록 각 행 -> annot id (위=최신)
+        self._drag_src_index = None
+        self._build()
+
+    def _build(self):
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
+        tk.Label(self, text="레이어", font=FONT_S, bg=PANEL, fg=TEXT_DIM)\
+            .pack(anchor="w", padx=14, pady=(8,4))
+
+        body = tk.Frame(self, bg=PANEL)
+        body.pack(fill="both", expand=True, padx=(14,0), pady=(0,10))
+
+        self.listbox = tk.Listbox(
+            body, bg="white", fg=TEXT, font=FONT_S,
+            relief="flat", bd=0, highlightthickness=0,
+            selectmode="browse", activestyle="none",
+            selectbackground=ACCENT, selectforeground="white")
+        self.listbox.pack(side="left", fill="both", expand=True)
+
+        sb = tk.Scrollbar(body, orient="vertical", command=self.listbox.yview,
+                           bg=TOOLBAR, troughcolor=PANEL)
+        sb.pack(side="right", fill="y")
+        self.listbox.config(yscrollcommand=sb.set)
+
+        self.listbox.bind("<<ListboxSelect>>", self._on_listbox_select)
+        # 클릭-드래그로 순서(z-order) 바꾸기 — 선택 자체는 Tk 가 기본
+        # 처리하는 <<ListboxSelect>> 로 이미 이뤄지므로, 여기서는 드래그
+        # 시작/이동/끝만 추가로 잡는다("add" 로 기존 처리와 공존).
+        self.listbox.bind("<ButtonPress-1>",   self._on_drag_start, add="+")
+        self.listbox.bind("<B1-Motion>",       self._on_drag_motion)
+        self.listbox.bind("<ButtonRelease-1>", self._on_drag_release)
+        self.listbox.bind("<MouseWheel>",
+            lambda e: self.listbox.yview_scroll(-1*(e.delta//120), "units"))
+
+    # ── 목록 내용 ────────────────────────────────────────
+    def _label_for(self, a, counts):
+        t = a.get("type")
+        if t == "text":
+            txt = (a.get("text") or "").replace("\n", " ").strip()
+            if not txt: txt = "(빈 텍스트)"
+            if len(txt) > 12: txt = txt[:12] + "…"
+            return f"T  {txt}"
+        name = {"rect": "사각형", "arrow": "화살표", "highlight": "강조"}.get(t, t or "?")
+        counts[t] = counts.get(t, 0) + 1
+        return f"{name} {counts[t]}"
+
+    def refresh(self):
+        """현재 페이지의 annots 로 목록을 다시 그리고, 캔버스 쪽 선택
+        상태에 맞춰 강조도 함께 갱신한다."""
+        pages = getattr(self.owner, "pages", None)
+        if not pages:
+            self.listbox.delete(0, tk.END)
+            self._ids_in_display_order = []
+            return
+        pg = self.owner._cur_page()
+        annots = pg.get("annots", [])
+        # 도형 번호(사각형 1, 사각형 2, ...)는 실제 생성 순서(annots 리스트
+        # 순서)를 기준으로 매겨서, 순서를 바꿔도(z-order 드래그) 값이
+        # 뒤죽박죽되지 않게 한다. 화면 표시 자체만 최근 생성이 위로 오도록
+        # 뒤집는다.
+        counts = {}
+        labels_by_id = {a["id"]: self._label_for(a, counts) for a in annots}
+        display = list(reversed(annots))
+        self._ids_in_display_order = [a["id"] for a in display]
+
+        self.listbox.delete(0, tk.END)
+        for a in display:
+            self.listbox.insert(tk.END, labels_by_id[a["id"]])
+
+        self._highlight_selected(self.owner.selected_id)
+
+    def _highlight_selected(self, aid):
+        self.listbox.selection_clear(0, tk.END)
+        if aid is None:
+            return
+        try:
+            idx = self._ids_in_display_order.index(aid)
+        except ValueError:
+            return
+        self.listbox.selection_set(idx)
+        self.listbox.see(idx)
+
+    # ── 클릭 → 캔버스에서 선택 ────────────────────────────
+    def _on_listbox_select(self, event):
+        sel = self.listbox.curselection()
+        if not sel: return
+        idx = sel[0]
+        if idx >= len(self._ids_in_display_order): return
+        aid = self._ids_in_display_order[idx]
+        if aid != self.owner.selected_id:
+            self.owner._select_annot(aid)
+
+    # ── 드래그 → 겹치는 순서(z-order) 변경 ───────────────
+    def _on_drag_start(self, event):
+        self._drag_src_index = self.listbox.nearest(event.y)
+
+    def _on_drag_motion(self, event):
+        if self._drag_src_index is None: return
+        idx = self.listbox.nearest(event.y)
+        self.listbox.selection_clear(0, tk.END)
+        self.listbox.selection_set(idx)
+
+    def _on_drag_release(self, event):
+        if self._drag_src_index is None: return
+        src = self._drag_src_index
+        self._drag_src_index = None
+        if not (0 <= src < len(self._ids_in_display_order)):
+            return
+        dst = self.listbox.nearest(event.y)
+        if src == dst:
+            self._highlight_selected(self.owner.selected_id)
+            return
+        self.owner._reorder_annot(self._ids_in_display_order[src], dst)
+
+
+# ══════════════════════════════════════════════════════════
 #  미리보기 창  (크게보기 + 편집: 삭제·회전·텍스트)
 # ══════════════════════════════════════════════════════════
 class PreviewWin(tk.Toplevel):
@@ -1338,6 +1469,11 @@ class PreviewWin(tk.Toplevel):
         self.side_panel_holder.pack_propagate(False)
         self.prop_panel  = TextPropPanel(self.side_panel_holder, owner=self)
         self.shape_panel = ShapePropPanel(self.side_panel_holder, owner=self)
+        # 레이어 목록은 속성 패널 아래 남는 공간을 항상 채운다(선택 여부와
+        # 무관하게 편집모드에서 계속 표시) — 속성 패널은 side="top", fill="x"
+        # 로만 필요한 만큼의 높이만 차지하도록 바뀌어야 이 공간이 생긴다.
+        self.layer_panel = LayerListPanel(self.side_panel_holder, owner=self)
+        self.layer_panel.pack(side="bottom", fill="both", expand=True)
 
         cf = tk.Frame(mid, bg=BG)
         cf.pack(side="left", fill="both", expand=True, padx=30, pady=12)
@@ -1475,6 +1611,7 @@ class PreviewWin(tk.Toplevel):
             self._cur_ph  = ph_pt
             self._cur_rot = rot
             self._draw_annots(pg)
+            self.layer_panel.refresh()
         except Exception as e:
             self.canvas.create_text(cw//2, ch//2, text=f"오류:\n{e}",
                                     fill="#a88", font=FONT, justify="center")
@@ -1797,10 +1934,16 @@ class PreviewWin(tk.Toplevel):
         self._redo_stack.clear()
 
     def _restore_snapshot(self, entry):
-        """스냅샷을 실제 페이지에 되돌리고 화면/속성패널을 갱신한다."""
+        """스냅샷을 실제 페이지에 되돌리고 화면/속성패널을 갱신한다.
+        지금 보고 있는 페이지 안에서의 되돌리기라면(거의 대부분의 경우)
+        배경(PDF 비트맵)은 바뀔 게 없으므로, 전체 재렌더링(_show())이
+        아니라 annot 만 다시 그리는 가벼운 경로로 처리해 Ctrl+Z/Y 때마다
+        화면이 깜빡이지 않게 한다. 다른 페이지의 편집을 되돌리는(드문)
+        경우에만 배경 자체가 바뀌므로 전체 재렌더링이 필요하다."""
         idx = entry["page_idx"]
         if not (0 <= idx < len(self.pages)):
             return
+        page_changed = (idx != self.idx)
         self.pages[idx]["annots"] = entry["annots"]
         self.idx = idx
         sel = self.selected_id
@@ -1808,8 +1951,9 @@ class PreviewWin(tk.Toplevel):
             a["id"] == sel for a in self.pages[idx].get("annots", []))
         if not still_exists:
             self.selected_id = None
-        self._show()
-        self._select_annot(self.selected_id)
+        if page_changed:
+            self._show()
+        self._select_annot(self.selected_id)   # 내부에서 _redraw_annots() 를 호출
         if self.on_change: self.on_change()
 
     def _undo(self):
@@ -1931,6 +2075,7 @@ class PreviewWin(tk.Toplevel):
         if self._sc is None: return
         self.canvas.delete("annot")
         self._draw_annots(self._cur_page())
+        self.layer_panel.refresh()
 
     def _select_annot(self, aid):
         self.selected_id = aid
@@ -1941,11 +2086,33 @@ class PreviewWin(tk.Toplevel):
             pg = self._cur_page()
             panel = self.prop_panel if annot.get("type") == "text" else self.shape_panel
             panel.show_annot(annot, pg.get("page_w_pt"), pg.get("page_h_pt"))
-            panel.pack(side="right", fill="y")
+            # side="top", fill="x": 필요한 높이만 차지하고, 그 아래 남는
+            # 공간은 레이어 목록(layer_panel, side="bottom")이 채운다.
+            panel.pack(side="top", fill="x")
         self._redraw_annots()
 
     def _on_annot_prop_changed(self):
         """속성 패널에서 값이 바뀌었을 때 캔버스에 즉시 반영 (배경 재렌더링 없이)."""
+        self._redraw_annots()
+        if self.on_change: self.on_change()
+
+    def _reorder_annot(self, aid, new_display_idx):
+        """레이어 목록에서 드래그로 순서를 바꾸면, annots 리스트 안에서의
+        실제 순서(=겹칠 때 위/아래 순서, PDF로 구울 때 그리는 순서)도 그에
+        맞게 바꾼다. 목록은 "최근 생성이 위" 로 보여주므로(annots 리스트의
+        역순), 화면에 보이는 위치(new_display_idx)를 실제 리스트 인덱스로
+        변환해서 옮긴다."""
+        pg = self._cur_page()
+        annots = pg.get("annots", [])
+        cur_idx = next((i for i, a in enumerate(annots) if a["id"] == aid), None)
+        if cur_idx is None: return
+        n = len(annots)
+        new_actual_idx = max(0, min(n - 1 - new_display_idx, n - 1))
+        if new_actual_idx == cur_idx:
+            return
+        self._push_undo()
+        annot = annots.pop(cur_idx)
+        annots.insert(new_actual_idx, annot)
         self._redraw_annots()
         if self.on_change: self.on_change()
 
@@ -2112,6 +2279,18 @@ class PreviewWin(tk.Toplevel):
                     tags=("annot", "annotsel"))
             if a.get("type") in ("rect", "arrow"):
                 self._draw_shape_handles(a)
+        elif self.edit_mode and a.get("type") in ("rect", "arrow", "highlight"):
+            # 선택되지 않은 도형도 편집 중에는 위치를 알아볼 수 있어야 한다
+            # (예: 흰 배경 위에 흰색 사각형으로 텍스트를 가려둔 경우, 도형
+            # 자체가 안 보여서 어디를 클릭해야 할지 알 수 없는 문제). 실제
+            # 색상과 무관하게 옅은 점선 안내선을 항상 살짝 보여준다 — 이
+            # 안내선은 화면에만 그려지고 PDF 내보내기 결과에는 영향 없다.
+            bbox = self.canvas.bbox(item)
+            if bbox:
+                self.canvas.create_rectangle(
+                    bbox[0]-1, bbox[1]-1, bbox[2]+1, bbox[3]+1,
+                    outline=TEXT_DIM, width=1, dash=(2,2),
+                    tags=("annot", "annothint"))
 
     def _draw_shape_handles(self, a):
         """선택된 사각형/화살표의 끝점에 마우스로 잡아 크기/방향을 조정할
