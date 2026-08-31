@@ -1851,6 +1851,10 @@ class PreviewWin(tk.Toplevel):
             # 때마다 새로 자리를 만들면 그때마다 캔버스 폭이 바뀌어 PDF가
             # 좌우로 밀려 보이는 문제가 있었다.
             self.side_panel_holder.pack(side="right", fill="y")
+            # prop_zone(속성 패널 자리)은 선택된 게 있을 때만 보여야 하므로,
+            # 편집모드에 막 들어온 시점의 선택 상태(보통 없음)에 맞춰
+            # 다시 한 번 반영해둔다.
+            self._select_annot(self.selected_id)
             self._set_tool(self.tool)
         else:
             self.edit_toolbar.pack_forget()
@@ -2104,6 +2108,14 @@ class PreviewWin(tk.Toplevel):
             # side="top", fill="x": 필요한 높이만 차지하고, 그 아래 남는
             # 공간은 레이어 목록(layer_panel, side="bottom")이 채운다.
             panel.pack(side="top", fill="x")
+            # 뭔가 선택됐을 때만 속성 패널 자리(prop_zone, 고정 높이)를
+            # 보여준다 — 텍스트/도형 사이에서는 이 자리가 고정 높이라
+            # 레이어 목록 위치가 흔들리지 않지만, 아무것도 선택 안 했을
+            # 때는 이 자리를 아예 없애서 레이어 목록이 오른쪽 칸 전체를
+            # 채우게 한다(빈 회색 칸만 떠 있는 게 보기 어색해서).
+            self.prop_zone.pack(side="top", fill="x")
+        else:
+            self.prop_zone.pack_forget()
         self._redraw_annots()
 
     def _on_annot_prop_changed(self):

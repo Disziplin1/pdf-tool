@@ -3379,10 +3379,11 @@ class TestLayerListPanel(unittest.TestCase):
         self.assertLess(pw.prop_panel.winfo_height(), pw.side_panel_holder.winfo_height())
         self.assertGreater(pw.layer_panel.winfo_height(), 0)
 
-    def test_layer_panel_position_is_stable_across_selection_types(self):
+    def test_layer_panel_position_is_stable_between_text_and_shape_selection(self):
         """텍스트 속성 패널(필드 많음)과 도형 속성 패널(필드 적음)의
         실제 높이가 서로 달라도, 그 자리(prop_zone)가 고정 높이라 레이어
-        목록이 시작하는 위치(y 좌표)는 항상 같아야 한다."""
+        목록이 시작하는 위치(y 좌표)는 텍스트를 선택하든 도형을 선택하든
+        항상 같아야 한다."""
         pages = self._make_pages()
         pw = self._open_preview(pages)
 
@@ -3395,24 +3396,49 @@ class TestLayerListPanel(unittest.TestCase):
         pw.update_idletasks()
         y_with_shape = pw.layer_panel.winfo_y()
 
-        pw._select_annot(None)
-        pw.update_idletasks()
-        y_with_none = pw.layer_panel.winfo_y()
-
         self.assertEqual(y_with_text, y_with_shape)
-        self.assertEqual(y_with_text, y_with_none)
 
-    def test_prop_zone_height_fixed_regardless_of_child_content(self):
+    def _is_packed(self, widget):
+        try:
+            widget.pack_info()
+            return True
+        except pt.tk.TclError:
+            return False
+
+    def test_layer_panel_fills_whole_column_when_nothing_selected(self):
+        """아무것도 선택 안 했을 때는 속성 패널 자리(prop_zone) 자체가
+        아예 없어져서, 레이어 목록이 오른쪽 칸 맨 위(y=0)부터 채워야
+        한다 — 빈 속성 패널 칸이 떠 있는 어색함을 없애기 위함."""
         pages = self._make_pages()
         pw = self._open_preview(pages)
-        h_before = pw.prop_zone.winfo_reqheight()
+        pw.update_idletasks()
+        self.assertEqual(pw.layer_panel.winfo_y(), 0)
+        self.assertFalse(self._is_packed(pw.prop_zone))
+
         pw._set_tool("text")
         pw._on_canvas_press(FakeEvent(x=300, y=300))
         pw.update_idletasks()
-        self.assertEqual(pw.prop_zone.winfo_height(), h_before)
+        self.assertTrue(self._is_packed(pw.prop_zone))
+        self.assertGreater(pw.layer_panel.winfo_y(), 0)
+
+        pw._select_annot(None)
+        pw.update_idletasks()
+        self.assertEqual(pw.layer_panel.winfo_y(), 0)
+        self.assertFalse(self._is_packed(pw.prop_zone))
+
+    def test_prop_zone_height_fixed_regardless_of_child_content(self):
+        """텍스트가 선택됐을 때와 도형이 선택됐을 때 prop_zone 의 실제
+        높이는 (필드 개수가 달라도) 항상 같아야 한다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw.update_idletasks()
+        h_with_text = pw.prop_zone.winfo_height()
         self._drag_create(pw, "rect", (300, 400), (400, 480))
         pw.update_idletasks()
-        self.assertEqual(pw.prop_zone.winfo_height(), h_before)
+        h_with_shape = pw.prop_zone.winfo_height()
+        self.assertEqual(h_with_text, h_with_shape)
 
     # ── 목록 내용 ────────────────────────────────────────
     def test_layer_list_shows_newest_first(self):
