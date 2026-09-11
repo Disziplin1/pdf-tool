@@ -1603,29 +1603,34 @@ class TestExportBakesTextAnnots(unittest.TestCase):
         self.assertEqual(len(doc), 1)
         doc.close()
 
-    def test_insert_pdf_link_failure_falls_back_to_no_links(self):
-        """원본 PDF의 링크 객체가 비정상이어서 insert_pdf() 가 실패해도,
-        링크 없이 페이지 내용만이라도 살리는 재시도로 저장이 성공해야
-        한다 (오래된 PDF 생성기가 만든, 링크 구조가 살짝 어긋난 파일에서
-        실제로 관찰된 실패 패턴)."""
+    def test_insert_pdf_widget_failure_falls_back_without_duplicating_page(self):
+        """실제로 확인된 실패 패턴: 원본 PDF의 양식 필드(widget) 복사
+        단계(insert_pdf 내부의 do_widgets)에서만 예외가 나는 경우. 그
+        시점엔 이미 페이지 내용 자체는 insert_pdf 에 의해 부분적으로
+        삽입된 뒤이므로, 단순히 다시 insert_pdf 를 부르면 페이지가
+        중복될 수 있다 — 재시도 전에 그 부분 삽입을 지우고 나서
+        links/widgets 없이 다시 시도해 정확히 원래 페이지 수만큼만
+        남아야 한다."""
         ot, pages = self._make_pages()
-        out = os.path.join(self.tmpdir, "out_linkfail.pdf")
+        out = os.path.join(self.tmpdir, "out_widgetfail.pdf")
 
-        orig_insert_pdf = pt.fitz.Document.insert_pdf
+        orig_do_widgets = pt.fitz.Document._do_widgets
         calls = []
-        def flaky_insert_pdf(self, docsrc, **kwargs):
-            calls.append(kwargs)
+        def flaky_do_widgets(self, *a, **kw):
+            calls.append(1)
             if len(calls) == 1:
                 raise IndexError("range object index out of range")
-            return orig_insert_pdf(self, docsrc, **kwargs)
+            return orig_do_widgets(self, *a, **kw)
 
-        with patch.object(pt.fitz.Document, "insert_pdf", flaky_insert_pdf):
+        with patch.object(pt.fitz.Document, "_do_widgets", flaky_do_widgets):
             self._export(ot, out)
 
         self.assertTrue(os.path.exists(out))
-        self.assertEqual(len(calls), 2, "첫 시도 실패 후 정확히 한 번 재시도해야 함")
-        self.assertEqual(calls[1].get("links"), 0,
-            "재시도할 때는 links=0 으로 링크 복사를 건너뛰어야 함")
+        doc = fitz.open(out)
+        n_pages = len(doc)
+        doc.close()
+        self.assertEqual(n_pages, len(pages),
+            "재시도 과정에서 페이지가 중복되면 안 됨")
 
     def test_exported_text_position_matches_editor_coords(self):
         """텍스트 위치(annot x/y, 좌상단 원점·Y아래증가)가 결과 PDF 에서도

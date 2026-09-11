@@ -3068,17 +3068,24 @@ class OrganizeTab(tk.Frame):
                     pidx       = pg["pidx"]
                     native_rot = src_doc[pidx].rotation
 
+                    count_before = out_doc.page_count
                     try:
                         out_doc.insert_pdf(src_doc, from_page=pidx, to_page=pidx)
                     except Exception:
-                        # 원본 PDF에 살짝 비정상적인 링크 객체가 들어있으면
-                        # (오래된 PDF 생성기가 만든 파일에서 종종 보임)
-                        # 링크를 복사하는 단계에서만 실패할 수 있다 — 링크
-                        # 없이 페이지 내용만이라도 살리도록 한 번 더 시도.
+                        # 원본 PDF의 링크/양식 필드(widget) 객체가 살짝
+                        # 비정상이면(오래된 PDF 생성기가 만든 파일에서 종종
+                        # 보임) 그것들을 복사하는 단계에서만 실패할 수
+                        # 있다 — 페이지 내용 자체는 이미 삽입된 뒤일 수
+                        # 있으므로(insert_pdf 가 부분 실행된 상태) 먼저
+                        # 지우고, 링크/양식 필드 없이 페이지 내용만이라도
+                        # 살리도록 한 번 더 시도한다.
                         _log_error(f"_build_baked_doc: page {page_no} insert_pdf "
-                                   f"with links failed, retrying without links "
-                                   f"(src={os.path.basename(src)}, pidx={pidx})")
-                        out_doc.insert_pdf(src_doc, from_page=pidx, to_page=pidx, links=0)
+                                   f"with links/widgets failed, retrying without "
+                                   f"them (src={os.path.basename(src)}, pidx={pidx})")
+                        while out_doc.page_count > count_before:
+                            out_doc.delete_page(count_before)
+                        out_doc.insert_pdf(src_doc, from_page=pidx, to_page=pidx,
+                                            links=0, widgets=0)
                     out_page  = out_doc[-1]
                     extra_rot = pg.get("rot", 0)
                     if extra_rot:
