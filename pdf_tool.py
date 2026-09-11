@@ -3,7 +3,7 @@ PDF 도구  ·  무료 · 오프라인 · 완전 로컬
   ▸ 정리 탭  : 드래그 정렬 · 체크박스 · 호버 툴바 · 미리보기 + 편집
   ▸ 변환 탭  : PDF → 이미지 / 이미지 → PDF
 """
-import sys, os, shutil, subprocess, threading, zipfile, math, tempfile, copy
+import sys, os, shutil, subprocess, threading, zipfile, math, tempfile, copy, traceback, datetime
 
 VERSION = "20260901.0911"                       # 배포.bat 이 자동 업데이트
 GITHUB_REPO  = "Disziplin1/pdf-tool"
@@ -16,6 +16,22 @@ INSTALL_DIR  = os.path.join(os.environ.get("LOCALAPPDATA", "C:\\Temp"), "PDF편�
 VERSIONS_DIR = os.path.join(INSTALL_DIR, "versions")
 CURRENT_FILE = os.path.join(INSTALL_DIR, "current.txt")
 LAUNCHER_EXE = os.path.join(INSTALL_DIR, "PDF 편집기.exe")
+ERROR_LOG    = os.path.join(INSTALL_DIR, "error_log.txt")
+
+
+def _log_error(context):
+    """예상 못한 예외의 전체 트레이스백을 INSTALL_DIR\\error_log.txt 에
+    이어붙인다. 로깅 자체가 실패해도(디스크 문제 등) 앱 동작에는
+    영향을 주면 안 되므로 조용히 무시한다."""
+    try:
+        os.makedirs(INSTALL_DIR, exist_ok=True)
+        with open(ERROR_LOG, "a", encoding="utf-8") as f:
+            f.write(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {context}\n")
+            f.write(traceback.format_exc())
+            f.write("\n")
+    except Exception:
+        pass
+
 
 def _resource_path(name):
     # PyInstaller onedir 은 exe 옆(onedir 구조에서는 _internal 폴더)에서 데이터 파일을 찾음
@@ -3044,20 +3060,28 @@ class OrganizeTab(tk.Frame):
         src_cache  = {}
         font_cache = {}
         try:
-            for pg in self.pages:
+            for page_no, pg in enumerate(self.pages, start=1):
                 src = pg["src"]
-                if src not in src_cache: src_cache[src] = fitz.open(src)
-                src_doc    = src_cache[src]
-                pidx       = pg["pidx"]
-                native_rot = src_doc[pidx].rotation
+                try:
+                    if src not in src_cache: src_cache[src] = fitz.open(src)
+                    src_doc    = src_cache[src]
+                    pidx       = pg["pidx"]
+                    native_rot = src_doc[pidx].rotation
 
-                out_doc.insert_pdf(src_doc, from_page=pidx, to_page=pidx)
-                out_page  = out_doc[-1]
-                extra_rot = pg.get("rot", 0)
-                if extra_rot:
-                    out_page.set_rotation((native_rot + extra_rot) % 360)
+                    out_doc.insert_pdf(src_doc, from_page=pidx, to_page=pidx)
+                    out_page  = out_doc[-1]
+                    extra_rot = pg.get("rot", 0)
+                    if extra_rot:
+                        out_page.set_rotation((native_rot + extra_rot) % 360)
 
-                _bake_all_annots(out_page, pg, native_rot, font_cache)
+                    _bake_all_annots(out_page, pg, native_rot, font_cache)
+                except Exception:
+                    _log_error(f"_build_baked_doc: page {page_no} "
+                               f"(src={os.path.basename(src)}, pidx={pg.get('pidx')})")
+                    raise RuntimeError(
+                        f"{page_no}번 페이지({os.path.basename(src)})를 저장하지 "
+                        f"못했습니다. 그 PDF 파일에 문제가 있을 수 있습니다.\n"
+                        f"자세한 내용: {ERROR_LOG}")
             return out_doc
         finally:
             for d in src_cache.values(): d.close()
@@ -3066,6 +3090,10 @@ class OrganizeTab(tk.Frame):
         out_doc = self._build_baked_doc()
         try:
             out_doc.save(out)
+        except Exception:
+            _log_error(f"_export_with_fitz: out_doc.save({os.path.basename(out)})")
+            raise RuntimeError(
+                f"PDF 파일로 저장하지 못했습니다.\n자세한 내용: {ERROR_LOG}")
         finally:
             out_doc.close()
 
