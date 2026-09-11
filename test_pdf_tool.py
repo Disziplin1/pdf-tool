@@ -1603,6 +1603,30 @@ class TestExportBakesTextAnnots(unittest.TestCase):
         self.assertEqual(len(doc), 1)
         doc.close()
 
+    def test_insert_pdf_link_failure_falls_back_to_no_links(self):
+        """원본 PDF의 링크 객체가 비정상이어서 insert_pdf() 가 실패해도,
+        링크 없이 페이지 내용만이라도 살리는 재시도로 저장이 성공해야
+        한다 (오래된 PDF 생성기가 만든, 링크 구조가 살짝 어긋난 파일에서
+        실제로 관찰된 실패 패턴)."""
+        ot, pages = self._make_pages()
+        out = os.path.join(self.tmpdir, "out_linkfail.pdf")
+
+        orig_insert_pdf = pt.fitz.Document.insert_pdf
+        calls = []
+        def flaky_insert_pdf(self, docsrc, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise IndexError("range object index out of range")
+            return orig_insert_pdf(self, docsrc, **kwargs)
+
+        with patch.object(pt.fitz.Document, "insert_pdf", flaky_insert_pdf):
+            self._export(ot, out)
+
+        self.assertTrue(os.path.exists(out))
+        self.assertEqual(len(calls), 2, "첫 시도 실패 후 정확히 한 번 재시도해야 함")
+        self.assertEqual(calls[1].get("links"), 0,
+            "재시도할 때는 links=0 으로 링크 복사를 건너뛰어야 함")
+
     def test_exported_text_position_matches_editor_coords(self):
         """텍스트 위치(annot x/y, 좌상단 원점·Y아래증가)가 결과 PDF 에서도
         같은 지점에 나타나는지, 텍스트 블록의 bbox 로 확인한다."""

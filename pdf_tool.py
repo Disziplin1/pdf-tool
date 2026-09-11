@@ -3068,7 +3068,17 @@ class OrganizeTab(tk.Frame):
                     pidx       = pg["pidx"]
                     native_rot = src_doc[pidx].rotation
 
-                    out_doc.insert_pdf(src_doc, from_page=pidx, to_page=pidx)
+                    try:
+                        out_doc.insert_pdf(src_doc, from_page=pidx, to_page=pidx)
+                    except Exception:
+                        # 원본 PDF에 살짝 비정상적인 링크 객체가 들어있으면
+                        # (오래된 PDF 생성기가 만든 파일에서 종종 보임)
+                        # 링크를 복사하는 단계에서만 실패할 수 있다 — 링크
+                        # 없이 페이지 내용만이라도 살리도록 한 번 더 시도.
+                        _log_error(f"_build_baked_doc: page {page_no} insert_pdf "
+                                   f"with links failed, retrying without links "
+                                   f"(src={os.path.basename(src)}, pidx={pidx})")
+                        out_doc.insert_pdf(src_doc, from_page=pidx, to_page=pidx, links=0)
                     out_page  = out_doc[-1]
                     extra_rot = pg.get("rot", 0)
                     if extra_rot:
