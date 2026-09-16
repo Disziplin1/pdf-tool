@@ -2212,6 +2212,233 @@ class TestShapeAnnots(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════
+#  7-1. 스포이드로 색 추출
+# ══════════════════════════════════════════════════════════
+class TestEyedropper(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pt.TkinterDnD.Tk() if pt.DND_OK else pt.tk.Tk()
+        cls.root.withdraw()
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_eyedrop_test_")
+        cls.pdf_path = os.path.join(cls.tmpdir, "sample.pdf")
+        make_pdf(cls.pdf_path, sizes=((595.28, 841.89),))  # 빈(흰색) 페이지
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _make_pages(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        return ot.pages
+
+    def _open_preview(self, pages):
+        pw = pt.PreviewWin(self.root, pages, 0)
+        pw.update_idletasks(); pw.geometry("1150x820+0+0"); pw.update(); pw._show()
+        self.addCleanup(pw.destroy)
+        pw._toggle_edit()
+        return pw
+
+    def _drag_create(self, pw, tool, p0, p1):
+        pw._set_tool(tool)
+        pw._on_canvas_press(FakeEvent(x=p0[0], y=p0[1]))
+        pw._on_canvas_motion(FakeEvent(x=p1[0], y=p1[1]))
+        pw._on_canvas_release(FakeEvent(x=p1[0], y=p1[1]))
+
+    def test_eyedropper_applies_sampled_color_to_text(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot = pages[0]["annots"][0]
+        annot["color"] = "#123456"   # 스포이드로 덮어써질 값과 다르게 만들어둠
+
+        pw.prop_panel._eyedrop_color()
+        self.assertIsNotNone(pw._eyedropper_target, "스포이드 모드로 전환되어야 함")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))   # 빈 페이지 내부 클릭 → 흰색
+
+        self.assertEqual(annot["color"], "#ffffff")
+        self.assertEqual(pw.prop_panel.color_btn.cget("bg"), "#ffffff")
+        self.assertIsNone(pw._eyedropper_target, "색을 적용한 뒤에는 스포이드 모드가 꺼져야 함")
+
+    def test_eyedropper_applies_sampled_color_to_shape_line(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 400), (450, 500))
+        annot = pages[0]["annots"][0]
+        annot["line_color"] = "#123456"
+
+        pw.shape_panel._eyedrop_line_color()
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+
+        self.assertEqual(annot["line_color"], "#ffffff")
+        self.assertEqual(pw.shape_panel.line_color_btn.cget("bg"), "#ffffff")
+
+    def test_eyedropper_click_outside_page_cancels_without_applying(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot = pages[0]["annots"][0]
+        annot["color"] = "#123456"
+
+        pw.prop_panel._eyedrop_color()
+        pw._on_canvas_press(FakeEvent(x=2, y=2))   # 캔버스는 있지만 페이지 이미지 바깥
+
+        self.assertEqual(annot["color"], "#123456", "페이지 밖을 클릭하면 색이 바뀌면 안 됨")
+        self.assertIsNone(pw._eyedropper_target, "실패해도 스포이드 모드는 꺼져야 함")
+
+    def test_escape_cancels_eyedropper(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw.prop_panel._eyedrop_color()
+        self.assertIsNotNone(pw._eyedropper_target)
+
+        # event_generate 로 실제 키 이벤트를 합성하는 방식은 창 포커스에
+        # 의존하는데, 창 매니저 없는 헤드리스 테스트 환경에서는 신뢰할 수
+        # 없다(레포에 이미 알려진 제약) — 바인딩된 핸들러를 직접 호출해
+        # "Esc 를 누르면 이 메서드가 실행된다"는 배선 자체를 확인한다.
+        pw._on_escape_key(FakeEvent())
+        self.assertIsNone(pw._eyedropper_target, "Esc 를 누르면 스포이드 모드가 취소되어야 함")
+
+    def test_eyedropper_click_does_not_create_shape_while_shape_tool_active(self):
+        """스포이드 모드로 들어가기 전에 사각형 도구가 선택되어 있었어도,
+        스포이드 클릭은 새 도형을 만들지 않고 색만 추출해야 한다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 400), (450, 500))
+        annot = pages[0]["annots"][0]
+        pw._set_tool("rect")   # 스포이드 시작 전 도구는 사각형 그대로
+
+        pw.shape_panel._eyedrop_fill_color()
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+
+        self.assertEqual(len(pages[0]["annots"]), 1, "스포이드 클릭이 새 사각형을 만들면 안 됨")
+        self.assertEqual(annot["fill_color"], "#ffffff")
+
+
+# ══════════════════════════════════════════════════════════
+#  7-2. 텍스트 드래그 크기조절(핸들)
+# ══════════════════════════════════════════════════════════
+class TestTextResizeHandles(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pt.TkinterDnD.Tk() if pt.DND_OK else pt.tk.Tk()
+        cls.root.withdraw()
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_textresize_test_")
+        cls.pdf_path = os.path.join(cls.tmpdir, "sample.pdf")
+        make_pdf(cls.pdf_path, sizes=((595.28, 841.89),))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _make_pages(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        return ot.pages
+
+    def _open_preview_with_text(self, pages, click=(400, 400)):
+        pw = pt.PreviewWin(self.root, pages, 0)
+        pw.update_idletasks(); pw.geometry("1150x820+0+0"); pw.update(); pw._show()
+        self.addCleanup(pw.destroy)
+        pw._toggle_edit()
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=click[0], y=click[1]))
+        annot = pages[0]["annots"][0]
+        pw._set_tool("select")
+        return pw, annot
+
+    def test_no_handle_placed_at_anchor_corner(self):
+        """왼쪽 정렬 텍스트는 기준점(x,y)이 bbox 좌상단과 겹치므로, 그
+        모서리에는 핸들이 없어야 한다 — 있으면 '클릭해서 선택/이동'과
+        '핸들을 드래그해 크기조절'이 같은 지점에서 충돌한다."""
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        self.assertEqual(annot.get("align", "left"), "left")
+        anchor_sx, anchor_sy, points = pw._text_handle_screen_corners(annot)
+        for name, (sx, sy) in points:
+            dist = ((sx-anchor_sx)**2 + (sy-anchor_sy)**2) ** 0.5
+            self.assertGreaterEqual(dist, pw.HANDLE_R,
+                f"핸들 {name} 이 기준점과 겹치면 안 됨")
+
+    def test_dragging_handle_outward_increases_font_size(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        annot["font_size"] = 20.0
+        pw._show()   # 새 font_size 로 다시 그려서 bbox/핸들 위치를 최신화
+
+        anchor_sx, anchor_sy, points = pw._text_handle_screen_corners(annot)
+        name, (hx, hy) = points[0]
+        pw._on_canvas_press(FakeEvent(x=hx, y=hy))
+        self.assertIsNotNone(pw._resize_state)
+        self.assertEqual(pw._resize_state.get("kind"), "text")
+
+        # 기준점에서 핸들까지 거리의 2배 지점까지 드래그 → 크기 약 2배
+        far_x = anchor_sx + (hx-anchor_sx)*2
+        far_y = anchor_sy + (hy-anchor_sy)*2
+        pw._on_canvas_motion(FakeEvent(x=far_x, y=far_y))
+        pw._on_canvas_release(FakeEvent(x=far_x, y=far_y))
+
+        self.assertAlmostEqual(annot["font_size"], 40.0, delta=0.5)
+
+    def test_dragging_handle_toward_anchor_decreases_font_size_but_not_below_min(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        annot["font_size"] = 20.0
+        pw._show()
+
+        anchor_sx, anchor_sy, points = pw._text_handle_screen_corners(annot)
+        name, (hx, hy) = points[0]
+        pw._on_canvas_press(FakeEvent(x=hx, y=hy))
+        # 기준점 바로 옆까지 드래그(사실상 거리 0에 가깝게)
+        pw._on_canvas_motion(FakeEvent(x=anchor_sx+1, y=anchor_sy+1))
+        pw._on_canvas_release(FakeEvent(x=anchor_sx+1, y=anchor_sy+1))
+
+        self.assertGreaterEqual(annot["font_size"], pt.TEXT_MIN_FONT_SIZE)
+
+    def test_resize_drag_is_a_single_undo_step(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        annot["font_size"] = 20.0
+        pw._show()
+        n_before = len(pw._undo_stack)
+
+        anchor_sx, anchor_sy, points = pw._text_handle_screen_corners(annot)
+        name, (hx, hy) = points[0]
+        pw._on_canvas_press(FakeEvent(x=hx, y=hy))
+        for i in range(5):   # 여러 모션 이벤트를 거치는 드래그 하나
+            pw._on_canvas_motion(FakeEvent(x=hx+i, y=hy+i))
+        pw._on_canvas_release(FakeEvent(x=hx+4, y=hy+4))
+
+        self.assertEqual(len(pw._undo_stack), n_before + 1)
+
+    def test_undo_restores_font_size_after_handle_resize(self):
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        annot["font_size"] = 20.0
+        pw._show()
+
+        anchor_sx, anchor_sy, points = pw._text_handle_screen_corners(annot)
+        name, (hx, hy) = points[0]
+        pw._on_canvas_press(FakeEvent(x=hx, y=hy))
+        far_x = anchor_sx + (hx-anchor_sx)*2
+        far_y = anchor_sy + (hy-anchor_sy)*2
+        pw._on_canvas_motion(FakeEvent(x=far_x, y=far_y))
+        pw._on_canvas_release(FakeEvent(x=far_x, y=far_y))
+        self.assertNotAlmostEqual(pages[0]["annots"][0]["font_size"], 20.0, delta=0.5)
+
+        pw._undo()
+        self.assertAlmostEqual(pages[0]["annots"][0]["font_size"], 20.0, delta=0.01)
+
+
+# ══════════════════════════════════════════════════════════
 #  8. 이미지 직접 불러오기(정리 탭) + jpg/png 로 내보내기
 # ══════════════════════════════════════════════════════════
 class TestImageImportAndExport(unittest.TestCase):
@@ -3604,6 +3831,62 @@ class TestLayerListPanel(unittest.TestCase):
         pw._on_canvas_press(FakeEvent(x=300, y=300))
         items = list(pw.layer_panel.listbox.get(0, pt.tk.END))
         self.assertEqual(len(items), 1)
+
+    # ── 레이어 목록에서 방향키: 목록 자체의 선택은 안 바뀌고, 선택된
+    #    annot 위치만 옮겨야 함 ────────────────────────────────────
+    def test_arrow_key_on_layer_list_moves_annot_not_listbox_selection(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        self._drag_create(pw, "rect", (300, 400), (400, 480))
+        text_id = pages[0]["annots"][0]["id"]
+
+        # "레이어에서 클릭해 선택" 시나리오: 목록에서 텍스트 행을 고른다.
+        pw.layer_panel.listbox.selection_clear(0, pt.tk.END)
+        text_row = pw.layer_panel._ids_in_display_order.index(text_id)
+        pw.layer_panel.listbox.selection_set(text_row)
+        pw.layer_panel._on_listbox_select(None)
+        self.assertEqual(pw.selected_id, text_id)
+
+        annot = pages[0]["annots"][0]
+        x_before, y_before = annot["x"], annot["y"]
+        pw.layer_panel._nudge_key_down(FakeEvent())
+
+        self.assertEqual(pw.layer_panel.listbox.curselection(), (text_row,),
+            "방향키를 눌러도 레이어 목록의 선택 행 자체는 그대로여야 함")
+        self.assertNotEqual((annot["x"], annot["y"]), (x_before, y_before),
+            "방향키는 레이어에서 고른 annot 의 위치를 옮겨야 함")
+
+    def test_arrow_key_on_layer_list_moves_shape_when_shape_selected(self):
+        """도형을 레이어에서 선택했을 때도 방향키로 위치를 옮길 수
+        있어야 한다(텍스트 전용이던 기존 로직의 사각형 누락 버그도
+        같이 확인)."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 400), (400, 480))
+        rect_id = pages[0]["annots"][0]["id"]
+        pw._select_annot(rect_id)
+
+        annot = pages[0]["annots"][0]
+        x0_before, x1_before = annot["x0"], annot["x1"]
+        pw.layer_panel._nudge_key_shift_right(FakeEvent())
+
+        self.assertNotEqual((annot["x0"], annot["x1"]), (x0_before, x1_before))
+
+    def test_left_right_on_layer_list_still_nudges_not_page_navigation(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        annot = pages[0]["annots"][0]
+        x_before = annot["x"]
+        idx_before = pw.idx
+
+        pw.layer_panel._nudge_key_right(FakeEvent())
+
+        self.assertEqual(pw.idx, idx_before, "선택된 게 있으면 페이지 이동이 아니라 이동이어야 함")
+        self.assertNotEqual(annot["x"], x_before)
 
 
 # ══════════════════════════════════════════════════════════

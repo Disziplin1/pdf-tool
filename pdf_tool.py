@@ -164,6 +164,8 @@ DEFAULT_ANNOT_FONT  = FM
 DEFAULT_ANNOT_SIZE  = 50.0     # pt
 DEFAULT_ANNOT_COLOR = "#000000"
 DEFAULT_ANNOT_TEXT  = "텍스트"  # 새 텍스트 생성 시 기본 내용(바로 선택되어 덮어쓰기 가능)
+TEXT_MIN_FONT_SIZE  = 4.0      # pt — 드래그로 크기조절할 때 이보다 작아지지 않게 막는다
+TEXT_MAX_FONT_SIZE  = 500.0    # pt — 드래그 중 실수로 폭주하지 않게 막는 상한
 
 # 도형(사각형/화살표/강조) annot 기본값
 DEFAULT_SHAPE_LINE_COLOR = "#000000"
@@ -692,6 +694,10 @@ class TextPropPanel(tk.Frame):
         self.color_btn = tk.Button(color_chip, text="   ", bg=DEFAULT_ANNOT_COLOR, width=4,
                                     relief="flat", bd=0, cursor="hand2", command=self._pick_color)
         self.color_btn.pack()
+        self.color_eyedrop_btn = tk.Button(crow, text="💧", font=FONT_S, width=2,
+                                            bg=TOOLBAR, fg=TEXT, relief="flat", bd=0,
+                                            cursor="hand2", command=self._eyedrop_color)
+        self.color_eyedrop_btn.pack(side="left", padx=(4,0))
 
         # ── 굵게 / 기울임 ─────────────────────────────────
         birow = tk.Frame(self, bg=PANEL); birow.pack(fill="x", padx=10, pady=(0,8))
@@ -821,6 +827,12 @@ class TextPropPanel(tk.Frame):
         if self.annot is None: return
         self.x_var.set(f"{pt_to_mm(self.annot['x']):.2f}")
         self.y_var.set(f"{self._y_pt_to_disp_mm(self.annot['y']):.2f}")
+
+    def refresh_size_only(self):
+        """핸들 드래그로 폰트 크기만 바뀌었을 때, 입력 포커스를 방해하지
+        않고 크기 표시만 갱신한다 (refresh_xy_only 와 동일한 목적)."""
+        if self.annot is None: return
+        self.size_var.set(f"{self.annot.get('font_size', DEFAULT_ANNOT_SIZE):.2f}")
 
     # ── Y 좌표 표시 변환 ────────────────────────────────────
     # 내부 저장(annot["y"])은 렌더링/회전 계산과 맞추기 위해 좌상단 원점 +
@@ -960,6 +972,21 @@ class TextPropPanel(tk.Frame):
             self.color_btn.config(bg=hexcol)
             self.owner._on_annot_prop_changed()
 
+    def _eyedrop_color(self):
+        """스포이드 모드로 전환해, 캔버스(PDF 미리보기)를 클릭하면 그
+        지점의 색을 그대로 텍스트 색상에 적용한다."""
+        if self.annot is None: return
+        self.owner._start_eyedropper(self._apply_eyedropped_color)
+
+    def _apply_eyedropped_color(self, hexcol):
+        if self.annot is None: return
+        cur = self.annot.get("color", DEFAULT_ANNOT_COLOR)
+        if hexcol == cur: return
+        self.owner._push_undo()
+        self.annot["color"] = hexcol
+        self.color_btn.config(bg=hexcol)
+        self.owner._on_annot_prop_changed()
+
 
 # ══════════════════════════════════════════════════════════
 #  도형(사각형/화살표/강조) 속성 패널
@@ -1007,7 +1034,7 @@ class ShapePropPanel(tk.Frame):
         self.line_frame = tk.Frame(self, bg=PANEL)
         tk.Label(self.line_frame, text="선", font=FONT_S, bg=PANEL, fg=TEXT_DIM)\
             .pack(anchor="w", padx=14)
-        lrow = tk.Frame(self.line_frame, bg=PANEL); lrow.pack(fill="x", padx=14, pady=(2,8))
+        lrow = tk.Frame(self.line_frame, bg=PANEL); lrow.pack(fill="x", padx=14, pady=(2,2))
         # 선 색이 흰색 등 패널 배경과 비슷할 때도 클릭 가능한 버튼임을 알
         # 수 있도록, 살짝 다른 색(TOOLBAR)의 칩 안에 스와치를 넣는다.
         line_chip = tk.Frame(lrow, bg=TOOLBAR, padx=3, pady=3)
@@ -1015,10 +1042,17 @@ class ShapePropPanel(tk.Frame):
         self.line_color_btn = tk.Button(line_chip, text="   ", bg=DEFAULT_SHAPE_LINE_COLOR, width=4,
                                          relief="flat", bd=0, cursor="hand2", command=self._pick_line_color)
         self.line_color_btn.pack()
+        self.line_eyedrop_btn = tk.Button(lrow, text="💧", font=FONT_S, width=2,
+                                           bg=TOOLBAR, fg=TEXT, relief="flat", bd=0,
+                                           cursor="hand2", command=self._eyedrop_line_color)
+        self.line_eyedrop_btn.pack(side="left", padx=(4,0))
+        # 폭 입력은 색상/스포이드 줄과 겹치면 230px 폭 안에서 잘리므로
+        # 따로 한 줄 아래에 둔다.
+        lwrow = tk.Frame(self.line_frame, bg=PANEL); lwrow.pack(fill="x", padx=14, pady=(0,8))
         self.line_width_var = tk.StringVar()
-        e_lw = tk.Entry(lrow, textvariable=self.line_width_var, font=FONT, width=5, bg="white", fg=TEXT)
-        e_lw.pack(side="left", padx=(8,2))
-        tk.Label(lrow, text="pt 굵기", font=FONT_XS, bg=PANEL, fg=TEXT_DIM).pack(side="left")
+        e_lw = tk.Entry(lwrow, textvariable=self.line_width_var, font=FONT, width=5, bg="white", fg=TEXT)
+        e_lw.pack(side="left", padx=(0,2))
+        tk.Label(lwrow, text="pt 굵기", font=FONT_XS, bg=PANEL, fg=TEXT_DIM).pack(side="left")
         e_lw.bind("<Return>",   lambda e: self._apply_line_width())
         e_lw.bind("<FocusOut>", lambda e: self._apply_line_width())
 
@@ -1034,6 +1068,10 @@ class ShapePropPanel(tk.Frame):
         self.fill_color_btn = tk.Button(fill_chip, text="   ", bg=DEFAULT_SHAPE_FILL_COLOR, width=4,
                                          relief="flat", bd=0, cursor="hand2", command=self._pick_fill_color)
         self.fill_color_btn.pack()
+        self.fill_eyedrop_btn = tk.Button(frow, text="💧", font=FONT_S, width=2,
+                                           bg=TOOLBAR, fg=TEXT, relief="flat", bd=0,
+                                           cursor="hand2", command=self._eyedrop_fill_color)
+        self.fill_eyedrop_btn.pack(side="left", padx=(4,0))
 
         # ── 강조 색상 (강조 전용) ───────────────────────────
         self.highlight_frame = tk.Frame(self, bg=PANEL)
@@ -1044,6 +1082,10 @@ class ShapePropPanel(tk.Frame):
         self.highlight_color_btn = tk.Button(highlight_chip, text="   ", bg=DEFAULT_HIGHLIGHT_COLOR, width=4,
                                               relief="flat", bd=0, cursor="hand2", command=self._pick_highlight_color)
         self.highlight_color_btn.pack()
+        self.highlight_eyedrop_btn = tk.Button(hrow, text="💧", font=FONT_S, width=2,
+                                                bg=TOOLBAR, fg=TEXT, relief="flat", bd=0,
+                                                cursor="hand2", command=self._eyedrop_highlight_color)
+        self.highlight_eyedrop_btn.pack(side="left", padx=(4,0))
 
         # ── 삭제 ────────────────────────────────────────────
         self._delete_sep = tk.Frame(self, bg=BORDER, height=1)
@@ -1124,6 +1166,34 @@ class ShapePropPanel(tk.Frame):
         self.refresh_xy_only()
         self.owner._on_annot_prop_changed()
 
+    # ── X/Y 미세조정 (방향키 · 레이어 패널에서 선택했을 때) ─────────
+    # 도형 전체를 x0/x1(또는 y0/y1) 폭은 그대로 유지한 채 평행이동한다.
+    # TextPropPanel._nudge_x/y 와 동일한 이름/시그니처로 맞춰서, 어느
+    # 패널이 떠 있든 PreviewWin._nudge_selected_x/y 가 그대로 호출할 수
+    # 있게 한다.
+    def _nudge_x(self, delta_mm):
+        if self.annot is None: return "break"
+        self.owner._push_undo()
+        d = mm_to_pt(delta_mm)
+        self.annot["x0"] += d
+        self.annot["x1"] += d
+        self.refresh_xy_only()
+        self.owner._on_annot_prop_changed()
+        return "break"
+
+    def _nudge_y(self, delta_mm):
+        if self.annot is None: return "break"
+        self.owner._push_undo()
+        # 화면 표시(y_var)는 위로 증가하는 관례라, 내부 pt 좌표(아래로
+        # 증가)로는 부호가 반대다 — TextPropPanel._disp_mm_to_y_pt 와
+        # 같은 변환을 x0/x1 대신 y0/y1 둘 다에 적용한다.
+        d = mm_to_pt(delta_mm)
+        self.annot["y0"] -= d
+        self.annot["y1"] -= d
+        self.refresh_xy_only()
+        self.owner._on_annot_prop_changed()
+        return "break"
+
     def _apply_line_width(self):
         if self.annot is None: return
         try:
@@ -1157,6 +1227,19 @@ class ShapePropPanel(tk.Frame):
             self.line_color_btn.config(bg=hexcol)
             self.owner._on_annot_prop_changed()
 
+    def _eyedrop_line_color(self):
+        if self.annot is None: return
+        self.owner._start_eyedropper(self._apply_eyedropped_line_color)
+
+    def _apply_eyedropped_line_color(self, hexcol):
+        if self.annot is None: return
+        cur = self.annot.get("line_color", DEFAULT_SHAPE_LINE_COLOR)
+        if hexcol == cur: return
+        self.owner._push_undo()
+        self.annot["line_color"] = hexcol
+        self.line_color_btn.config(bg=hexcol)
+        self.owner._on_annot_prop_changed()
+
     def _pick_fill_color(self):
         if self.annot is None: return
         from tkinter import colorchooser
@@ -1168,6 +1251,19 @@ class ShapePropPanel(tk.Frame):
             self.fill_color_btn.config(bg=hexcol)
             self.owner._on_annot_prop_changed()
 
+    def _eyedrop_fill_color(self):
+        if self.annot is None: return
+        self.owner._start_eyedropper(self._apply_eyedropped_fill_color)
+
+    def _apply_eyedropped_fill_color(self, hexcol):
+        if self.annot is None: return
+        cur = self.annot.get("fill_color", DEFAULT_SHAPE_FILL_COLOR)
+        if hexcol == cur: return
+        self.owner._push_undo()
+        self.annot["fill_color"] = hexcol
+        self.fill_color_btn.config(bg=hexcol)
+        self.owner._on_annot_prop_changed()
+
     def _pick_highlight_color(self):
         if self.annot is None: return
         from tkinter import colorchooser
@@ -1178,6 +1274,19 @@ class ShapePropPanel(tk.Frame):
             self.annot["fill_color"] = hexcol
             self.highlight_color_btn.config(bg=hexcol)
             self.owner._on_annot_prop_changed()
+
+    def _eyedrop_highlight_color(self):
+        if self.annot is None: return
+        self.owner._start_eyedropper(self._apply_eyedropped_highlight_color)
+
+    def _apply_eyedropped_highlight_color(self, hexcol):
+        if self.annot is None: return
+        cur = self.annot.get("fill_color", DEFAULT_HIGHLIGHT_COLOR)
+        if hexcol == cur: return
+        self.owner._push_undo()
+        self.annot["fill_color"] = hexcol
+        self.highlight_color_btn.config(bg=hexcol)
+        self.owner._on_annot_prop_changed()
 
     def _delete_shape(self):
         if self.annot is None: return
@@ -1228,6 +1337,45 @@ class LayerListPanel(tk.Frame):
         self.listbox.bind("<ButtonRelease-1>", self._on_drag_release)
         self.listbox.bind("<MouseWheel>",
             lambda e: self.listbox.yview_scroll(-1*(e.delta//120), "units"))
+
+        # 방향키는 tk.Listbox 기본 동작(목록 안에서 선택 항목을 위/아래로
+        # 옮김)을 막고, 대신 항상 캔버스에서 이 레이어를 클릭해 선택한
+        # 것과 같은 의미로 — 그 annot 의 위치를 미세조정하는 데에만
+        # 쓰이게 한다. 각 핸들러가 "break"를 반환하면 Listbox 자체의
+        # 방향키 처리(클래스 바인딩)로도, PreviewWin 전체에 걸린 방향키
+        # 바인딩(중복 실행)으로도 더 이상 전달되지 않는다.
+        self.listbox.bind("<Up>",          self._nudge_key_up)
+        self.listbox.bind("<Down>",        self._nudge_key_down)
+        self.listbox.bind("<Left>",        self._nudge_key_left)
+        self.listbox.bind("<Right>",       self._nudge_key_right)
+        self.listbox.bind("<Shift-Up>",    self._nudge_key_shift_up)
+        self.listbox.bind("<Shift-Down>",  self._nudge_key_shift_down)
+        self.listbox.bind("<Shift-Left>",  self._nudge_key_shift_left)
+        self.listbox.bind("<Shift-Right>", self._nudge_key_shift_right)
+
+    def _nudge_key_up(self, event):
+        self.owner._nudge_selected_y(0.1); return "break"
+
+    def _nudge_key_down(self, event):
+        self.owner._nudge_selected_y(-0.1); return "break"
+
+    def _nudge_key_left(self, event):
+        self.owner._on_key_left(); return "break"
+
+    def _nudge_key_right(self, event):
+        self.owner._on_key_right(); return "break"
+
+    def _nudge_key_shift_up(self, event):
+        self.owner._nudge_selected_y(1.0); return "break"
+
+    def _nudge_key_shift_down(self, event):
+        self.owner._nudge_selected_y(-1.0); return "break"
+
+    def _nudge_key_shift_left(self, event):
+        self.owner._nudge_selected_x(-1.0); return "break"
+
+    def _nudge_key_shift_right(self, event):
+        self.owner._nudge_selected_x(1.0); return "break"
 
     # ── 목록 내용 ────────────────────────────────────────
     def _label_for(self, a, counts):
@@ -1346,6 +1494,12 @@ class PreviewWin(tk.Toplevel):
         # 처음 좌표가 바뀌는 그 순간에만 스냅샷 1개를 남기기 위한 플래그.
         self._move_snapshot_pending = False
         self._resize_snapshot_pending = False
+        # ── 스포이드(색상 추출) ────────────────────────────────
+        # 활성화되면 다음 캔버스 클릭이 도형 생성/선택 등 평소 동작 대신
+        # 그 지점의 색을 읽어 _eyedropper_target(hexcol) 콜백에 전달한다.
+        self._eyedropper_target = None
+        self._pil_img = None   # _show() 가 그린 페이지의 PIL 이미지(스포이드로 픽셀 샘플링용)
+        self._img_w = self._img_h = None
         # ── 이동(팬) 도구 — 버튼 토글 또는 스페이스바로 임시 활성화 ──
         self._pan_active     = False # 팬 도구가 (버튼/스페이스 무엇으로든) 켜져 있는지
         self._tool_before_pan = "select"  # 팬을 끌 때 되돌아갈 이전 도구
@@ -1415,6 +1569,8 @@ class PreviewWin(tk.Toplevel):
         self.bind("<Control-Z>",  lambda e: None if self._focus_in_entry() else self._undo())
         self.bind("<Control-y>",  lambda e: None if self._focus_in_entry() else self._redo())
         self.bind("<Control-Y>",  lambda e: None if self._focus_in_entry() else self._redo())
+        # Esc: 스포이드 모드 중이면 취소만 하고 창은 닫지 않는다.
+        self.bind("<Escape>", self._on_escape_key)
         # 스페이스바: 누르고 있는 동안 임시로 팬(이동) 도구로 전환, 떼면 원래
         # 도구로 복귀. 이미 팬 버튼으로 켜둔 상태라면 한 번 눌렀다 떼는 것만
         # 으로 팬을 끈다(버튼을 다시 누르는 것과 동일한 효과).
@@ -1622,8 +1778,10 @@ class PreviewWin(tk.Toplevel):
             rot  = pg.get("rot", 0)
             if rot: img = img.rotate(-rot, expand=True)
             self.photo = ImageTk.PhotoImage(img)
+            self._pil_img = img   # 스포이드가 이 이미지에서 픽셀을 직접 읽는다
 
             iw, ih = img.width, img.height
+            self._img_w, self._img_h = iw, ih
             ix = cw//2 + self.pan_x
             iy = ch//2 + self.pan_y
             # 부드러운 그림자
@@ -1677,13 +1835,23 @@ class PreviewWin(tk.Toplevel):
         else:
             self._go(1)
 
+    def _nudge_panel_for_selected(self):
+        """현재 선택된 annot의 타입에 맞는 속성 패널(텍스트/도형)을
+        반환한다 — 방향키 미세조정이 항상 실제로 화면에 뜬(그리고
+        annot 을 들고 있는) 패널로 가게 하기 위함."""
+        a = self._find_annot(self.selected_id)
+        if a is None: return None
+        return self.prop_panel if a.get("type") == "text" else self.shape_panel
+
     def _nudge_selected_x(self, delta_mm):
         if self.selected_id is None: return
-        self.prop_panel._nudge_x(delta_mm)
+        panel = self._nudge_panel_for_selected()
+        if panel is not None: panel._nudge_x(delta_mm)
 
     def _nudge_selected_y(self, delta_mm):
         if self.selected_id is None: return
-        self.prop_panel._nudge_y(delta_mm)
+        panel = self._nudge_panel_for_selected()
+        if panel is not None: panel._nudge_y(delta_mm)
 
     def _zoom_reset(self):
         self.zoom  = 1.0
@@ -1693,6 +1861,9 @@ class PreviewWin(tk.Toplevel):
 
     # ── 캔버스 드래그 — 편집 모드/도구에 따라 분기 ────────────
     def _on_canvas_press(self, e):
+        if self._eyedropper_target is not None:
+            self._pick_pixel_color(e)
+            return
         if self.edit_mode and self.tool == "text":
             self._create_text_at(e.x, e.y)
             return
@@ -1904,6 +2075,37 @@ class PreviewWin(tk.Toplevel):
             cursor = ""
         self.canvas.config(cursor=cursor)
 
+    # ── 스포이드(색상 추출) ──────────────────────────────────
+    def _start_eyedropper(self, apply_fn):
+        """스포이드 모드로 전환한다. 다음 캔버스 클릭에서 그 지점의
+        색을 읽어 apply_fn(hexcol) 을 호출하고 원래 도구로 돌아간다."""
+        self._eyedropper_target = apply_fn
+        self.canvas.config(cursor="tcross")
+
+    def _cancel_eyedropper(self):
+        self._eyedropper_target = None
+        self._set_tool(self.tool)   # 현재 도구에 맞는 커서로 복원
+
+    def _on_escape_key(self, event):
+        if self._eyedropper_target is not None:
+            self._cancel_eyedropper()
+
+    def _pick_pixel_color(self, e):
+        """스포이드 모드에서 캔버스 클릭 지점의 색을 읽어 적용한다."""
+        fn = self._eyedropper_target
+        img = self._pil_img
+        if fn is None or img is None or self._img_w is None:
+            self._cancel_eyedropper()
+            return
+        ix = int(e.x - (self._cx - self._img_w/2))
+        iy = int(e.y - (self._cy - self._img_h/2))
+        self._eyedropper_target = None
+        self._set_tool(self.tool)
+        if not (0 <= ix < self._img_w and 0 <= iy < self._img_h):
+            return   # 이미지 바깥을 클릭하면 조용히 취소
+        r, g, b = img.getpixel((ix, iy))[:3]
+        fn(f"#{r:02x}{g:02x}{b:02x}")
+
     # ── 이동(팬) 도구 켬/끔 ────────────────────────────────
     def _enable_pan(self):
         if self._pan_active: return
@@ -2024,19 +2226,58 @@ class PreviewWin(tk.Toplevel):
         return [("x0y0", (a["x0"], a["y0"])), ("x1y0", (a["x1"], a["y0"])),
                 ("x0y1", (a["x0"], a["y1"])), ("x1y1", (a["x1"], a["y1"]))]
 
+    def _text_handle_screen_corners(self, a):
+        """선택된 텍스트의 크기조절 핸들 후보 좌표(화면 기준점 포함).
+        텍스트는 사각형처럼 x0/y0/x1/y1 로 저장돼 있지 않으므로(기준점
+        x,y + font_size 만 가짐), 실제로 캔버스에 그려진 결과물의 bbox
+        네 모서리를 후보로 삼는다 — 단, 텍스트 기준점(annot["x"/"y"],
+        정렬에 따라 좌상단/상단중앙/우상단 중 하나)과 겹치는 모서리는
+        제외한다. 그 지점은 캔버스를 클릭해 텍스트를 선택·이동시키는
+        지점과 같아서(특히 방금 만든 자리를 그대로 클릭하는 경우),
+        핸들을 놓으면 이동 클릭과 부딪히고, 애초에 그 점을 기준으로
+        크기를 조절하는 것도 의미가 없다(배율이 0에 가까워짐)."""
+        items = self.canvas.find_withtag(f"annot_{a['id']}")
+        if not items: return None
+        bbox = self.canvas.bbox(items[0])
+        if not bbox: return None
+        x0, y0, x1, y1 = bbox
+        anchor_sx, anchor_sy = pdf_to_screen(a["x"], a["y"], self._cur_pw, self._cur_ph,
+                                              self._cur_rot, self._sc, self._cx, self._cy)
+        points = []
+        for name, (sx, sy) in [("tl", (x0,y0)), ("tr", (x1,y0)),
+                                ("bl", (x0,y1)), ("br", (x1,y1))]:
+            if math.hypot(sx-anchor_sx, sy-anchor_sy) < self.HANDLE_R:
+                continue
+            points.append((name, (sx, sy)))
+        return anchor_sx, anchor_sy, points
+
     def _handle_hit_test(self, ex, ey):
-        """선택된 도형(사각형/화살표)의 핸들 위를 클릭했는지 확인한다.
-        핸들은 선택된 도형에만 그려지므로, 그 도형에 대해서만 판정한다."""
+        """선택된 도형(사각형/화살표) 또는 텍스트의 크기조절 핸들 위를
+        클릭했는지 확인한다. 핸들은 선택된 annot 에만 그려지므로, 그
+        annot 에 대해서만 판정한다."""
         if self._sc is None or self.selected_id is None:
             return None
         a = self._find_annot(self.selected_id)
-        if a is None or a.get("type") not in ("rect", "arrow"):
+        if a is None:
             return None
-        for name, (x_pt, y_pt) in self._shape_handle_points(a):
-            sx, sy = pdf_to_screen(x_pt, y_pt, self._cur_pw, self._cur_ph,
-                                    self._cur_rot, self._sc, self._cx, self._cy)
-            if abs(sx-ex) <= self.HANDLE_R and abs(sy-ey) <= self.HANDLE_R:
-                return {"annot_id": a["id"], "handle": name}
+        if a.get("type") in ("rect", "arrow"):
+            for name, (x_pt, y_pt) in self._shape_handle_points(a):
+                sx, sy = pdf_to_screen(x_pt, y_pt, self._cur_pw, self._cur_ph,
+                                        self._cur_rot, self._sc, self._cx, self._cy)
+                if abs(sx-ex) <= self.HANDLE_R and abs(sy-ey) <= self.HANDLE_R:
+                    return {"annot_id": a["id"], "handle": name, "kind": "shape"}
+            return None
+        if a.get("type") == "text":
+            result = self._text_handle_screen_corners(a)
+            if result is None: return None
+            anchor_sx, anchor_sy, points = result
+            for name, (sx, sy) in points:
+                if abs(sx-ex) <= self.HANDLE_R and abs(sy-ey) <= self.HANDLE_R:
+                    start_dist = math.hypot(sx-anchor_sx, sy-anchor_sy)
+                    return {"annot_id": a["id"], "handle": name, "kind": "text",
+                            "anchor": (anchor_sx, anchor_sy), "start_dist": start_dist,
+                            "start_font_size": a.get("font_size", DEFAULT_ANNOT_SIZE)}
+            return None
         return None
 
     def _resize_annot(self, e):
@@ -2046,6 +2287,15 @@ class PreviewWin(tk.Toplevel):
         if self._resize_snapshot_pending:
             self._push_undo()
             self._resize_snapshot_pending = False
+        if self._resize_state.get("kind") == "text":
+            anchor_sx, anchor_sy = self._resize_state["anchor"]
+            cur_dist = math.hypot(e.x-anchor_sx, e.y-anchor_sy)
+            scale = cur_dist / self._resize_state["start_dist"]
+            new_size = self._resize_state["start_font_size"] * scale
+            a["font_size"] = max(TEXT_MIN_FONT_SIZE, min(new_size, TEXT_MAX_FONT_SIZE))
+            self.prop_panel.refresh_size_only()
+            self._redraw_annots()
+            return
         handle = self._resize_state["handle"]
         x_pt, y_pt = screen_to_pdf(e.x, e.y, self._cur_pw, self._cur_ph,
                                     self._cur_rot, self._sc, self._cx, self._cy)
@@ -2322,6 +2572,8 @@ class PreviewWin(tk.Toplevel):
                     tags=("annot", "annotsel"))
             if a.get("type") in ("rect", "arrow"):
                 self._draw_shape_handles(a)
+            elif a.get("type") == "text":
+                self._draw_text_handles(a)
         elif self.edit_mode and a.get("type") in ("rect", "arrow", "highlight"):
             # 선택되지 않은 도형도 편집 중에는 위치를 알아볼 수 있어야 한다
             # (예: 흰 배경 위에 흰색 사각형으로 텍스트를 가려둔 경우, 도형
@@ -2342,6 +2594,23 @@ class PreviewWin(tk.Toplevel):
         for _, (x_pt, y_pt) in self._shape_handle_points(a):
             sx, sy = pdf_to_screen(x_pt, y_pt, self._cur_pw, self._cur_ph,
                                     self._cur_rot, self._sc, self._cx, self._cy)
+            self.canvas.create_rectangle(
+                sx-r, sy-r, sx+r, sy+r,
+                fill=ACCENT, outline="white", width=1,
+                tags=("annot", "annotsel"))
+
+    def _draw_text_handles(self, a):
+        """선택된 텍스트의 크기조절 핸들을 그린다(기준점과 겹치는
+        모서리는 _text_handle_screen_corners 가 이미 제외함). 어느
+        모서리를 드래그해도 텍스트 기준점(annot["x"/"y"])을 중심으로
+        글자 크기(font_size)가 커지거나 작아진다 — 사각형 핸들과
+        똑같이 생겼지만, 도형처럼 폭/높이를 따로 갖는 게 아니라 글자
+        크기 하나만 바뀐다는 점이 다르다."""
+        result = self._text_handle_screen_corners(a)
+        if result is None: return
+        _, _, points = result
+        r = self.HANDLE_R
+        for _, (sx, sy) in points:
             self.canvas.create_rectangle(
                 sx-r, sy-r, sx+r, sy+r,
                 fill=ACCENT, outline="white", width=1,
