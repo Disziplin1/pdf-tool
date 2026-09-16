@@ -405,15 +405,11 @@ def _resolve_annot_font(family, bold, italic, alias):
         return fitz.Font(fontname="helv"), None, "helv"
 
 
-def _bake_text_annot(page, a, raw_w, raw_h, native_rot, font_cache):
-    """annot 하나를 page(원본 회전 native_rot 을 아직 갖고 있는 상태)에
-    실제 텍스트로 삽입한다. font_cache 는 (family,bold,italic) ->
-    (fitz.Font, fontfile, insert_text 용 fontname) 을 캐싱해 같은 폰트를
-    여러 번 등록하지 않게 한다."""
-    x_pt, y_pt = a["x"], a["y"]
-    if native_rot:
-        x_pt, y_pt = unrotate_point_pt(x_pt, y_pt, raw_w, raw_h, native_rot)
-
+def _resolve_and_measure_text(a, font_cache):
+    """annot 의 폰트를 찾고, 각 줄의 실제 렌더링 폭까지 함께 측정해
+    돌려준다. 내보내기(_bake_text_annot)와 편집 화면 미리보기가 똑같은
+    폭 측정 결과를 쓰게 하려고 분리했다 — 두 군데가 서로 다른 방식으로
+    재서 줄바꿈/정렬이 어긋나 보이는 일이 없게 하는 게 핵심."""
     family = a.get("font", DEFAULT_ANNOT_FONT)
     bold = bool(a.get("bold"))
     italic = bool(a.get("italic"))
@@ -424,8 +420,6 @@ def _bake_text_annot(page, a, raw_w, raw_h, native_rot, font_cache):
     font, fontfile, fontname = font_cache[cache_key]
 
     size = a.get("font_size", DEFAULT_ANNOT_SIZE)
-    color = _color_hex_to_rgb01(a.get("color", DEFAULT_ANNOT_COLOR))
-    align = a.get("align", "left")
     lines = (a.get("text", "") or "").split("\n")
     try:
         ascent = size * (font.ascender or 0.8)
@@ -445,6 +439,22 @@ def _bake_text_annot(page, a, raw_w, raw_h, native_rot, font_cache):
             widths = [fitz.get_text_length(ln, fontname=fontname, fontsize=size) for ln in lines]
     except Exception:
         widths = [0.0 for _ in lines]
+    return font, fontfile, fontname, size, ascent, line_height, lines, widths
+
+
+def _bake_text_annot(page, a, raw_w, raw_h, native_rot, font_cache):
+    """annot 하나를 page(원본 회전 native_rot 을 아직 갖고 있는 상태)에
+    실제 텍스트로 삽입한다. font_cache 는 (family,bold,italic) ->
+    (fitz.Font, fontfile, insert_text 용 fontname) 을 캐싱해 같은 폰트를
+    여러 번 등록하지 않게 한다."""
+    x_pt, y_pt = a["x"], a["y"]
+    if native_rot:
+        x_pt, y_pt = unrotate_point_pt(x_pt, y_pt, raw_w, raw_h, native_rot)
+
+    font, fontfile, fontname, size, ascent, line_height, lines, widths = \
+        _resolve_and_measure_text(a, font_cache)
+    color = _color_hex_to_rgb01(a.get("color", DEFAULT_ANNOT_COLOR))
+    align = a.get("align", "left")
 
     # Tk canvas 의 angle(반시계+)과 통일하려고 부호를 반전했던 것과 동일한
     # 이유로, PyMuPDF Matrix.prerotate() 도 반시계+ 이므로 부호를 반전한다.
@@ -976,7 +986,7 @@ class TextPropPanel(tk.Frame):
         """스포이드 모드로 전환해, 캔버스(PDF 미리보기)를 클릭하면 그
         지점의 색을 그대로 텍스트 색상에 적용한다."""
         if self.annot is None: return
-        self.owner._start_eyedropper(self._apply_eyedropped_color)
+        self.owner._toggle_eyedropper(self._apply_eyedropped_color)
 
     def _apply_eyedropped_color(self, hexcol):
         if self.annot is None: return
@@ -1229,7 +1239,7 @@ class ShapePropPanel(tk.Frame):
 
     def _eyedrop_line_color(self):
         if self.annot is None: return
-        self.owner._start_eyedropper(self._apply_eyedropped_line_color)
+        self.owner._toggle_eyedropper(self._apply_eyedropped_line_color)
 
     def _apply_eyedropped_line_color(self, hexcol):
         if self.annot is None: return
@@ -1253,7 +1263,7 @@ class ShapePropPanel(tk.Frame):
 
     def _eyedrop_fill_color(self):
         if self.annot is None: return
-        self.owner._start_eyedropper(self._apply_eyedropped_fill_color)
+        self.owner._toggle_eyedropper(self._apply_eyedropped_fill_color)
 
     def _apply_eyedropped_fill_color(self, hexcol):
         if self.annot is None: return
@@ -1277,7 +1287,7 @@ class ShapePropPanel(tk.Frame):
 
     def _eyedrop_highlight_color(self):
         if self.annot is None: return
-        self.owner._start_eyedropper(self._apply_eyedropped_highlight_color)
+        self.owner._toggle_eyedropper(self._apply_eyedropped_highlight_color)
 
     def _apply_eyedropped_highlight_color(self, hexcol):
         if self.annot is None: return
@@ -1468,6 +1478,7 @@ class PreviewWin(tk.Toplevel):
         self.idx       = start
         self.photo     = None
         self._rid      = None
+        self._zoom_rid = None   # 마우스 휠 확대/축소 디바운스 타이머(깜빡임/버벅임 방지)
         self.on_change = on_change   # 편집 후 부모 갱신 콜백
         self.zoom      = 1.0         # 줌 배율
         self.pan_x     = 0           # 이동 오프셋 X
@@ -1500,6 +1511,10 @@ class PreviewWin(tk.Toplevel):
         self._eyedropper_target = None
         self._pil_img = None   # _show() 가 그린 페이지의 PIL 이미지(스포이드로 픽셀 샘플링용)
         self._img_w = self._img_h = None
+        # 편집 화면에서 텍스트 글자 폭을 잴 때 쓰는 폰트 캐시 — 내보내기와
+        # 똑같은 폰트 탐색(_resolve_annot_font, Windows 레지스트리 조회
+        # 포함)을 매번 새로 하면 느리므로 창이 떠 있는 동안 재사용한다.
+        self._preview_font_cache = {}
         # ── 이동(팬) 도구 — 버튼 토글 또는 스페이스바로 임시 활성화 ──
         self._pan_active     = False # 팬 도구가 (버튼/스페이스 무엇으로든) 켜져 있는지
         self._tool_before_pan = "select"  # 팬을 끌 때 되돌아갈 이전 도구
@@ -1671,7 +1686,7 @@ class PreviewWin(tk.Toplevel):
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>",      self._on_resize)
         self.canvas.bind("<MouseWheel>",
-                         lambda e: self._zoom(1.15 if e.delta > 0 else 1/1.15))
+                         lambda e: self._zoom_wheel(1.15 if e.delta > 0 else 1/1.15))
         self.canvas.bind("<ButtonPress-1>",  self._on_canvas_press)
         self.canvas.bind("<B1-Motion>",      self._on_canvas_motion)
         self.canvas.bind("<ButtonRelease-1>",self._on_canvas_release)
@@ -1754,13 +1769,21 @@ class PreviewWin(tk.Toplevel):
         self.btn_prev.config(state="normal" if self.idx > 0   else "disabled")
         self.btn_next.config(state="normal" if self.idx < n-1 else "disabled")
 
-        self.canvas.delete("all")
         self.zoom_lbl.config(text=f"{int(self.zoom*100)}%")
-        self.update_idletasks()
+        # 캔버스는 창이 이미 떠 있는 동안은 크기가 항상 최신값이다(최초
+        # 표시는 after()로 지연 호출해 창이 자리잡은 뒤에 실행됨) —
+        # update_idletasks() 로 강제 갱신할 필요가 없다. 예전에는 여기서
+        # canvas.delete("all") 직후 update_idletasks() 를 불렀는데, 그러면
+        # 그 시점에 "지워진 빈 캔버스"가 그대로 한 번 화면에 그려지고
+        # 나서야 새 이미지가 뒤이어 그려져, 확대/축소(특히 마우스 휠로
+        # 연속으로 할 때)할 때마다 화면이 하얗게 깜빡이는 원인이 됐다.
+        # 아래에서는 새 이미지를 다 준비한 뒤 지우기+다시 그리기를 한
+        # 번에 끝내서 그 빈 화면이 눈에 보이지 않게 한다.
         cw = max(self.canvas.winfo_width(), 400)
         ch = max(self.canvas.winfo_height(), 300)
 
         if not PREVIEW_OK:
+            self.canvas.delete("all")
             self.canvas.create_text(cw//2, ch//2,
                 text="pip install pymupdf pillow 필요",
                 fill="#998", font=FONT_B, justify="center")
@@ -1777,13 +1800,18 @@ class PreviewWin(tk.Toplevel):
             img  = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             rot  = pg.get("rot", 0)
             if rot: img = img.rotate(-rot, expand=True)
-            self.photo = ImageTk.PhotoImage(img)
-            self._pil_img = img   # 스포이드가 이 이미지에서 픽셀을 직접 읽는다
+            photo = ImageTk.PhotoImage(img)
 
             iw, ih = img.width, img.height
-            self._img_w, self._img_h = iw, ih
             ix = cw//2 + self.pan_x
             iy = ch//2 + self.pan_y
+
+            # 여기까지는 화면에 아무 영향이 없는 준비 단계 — 지우기와
+            # 새로 그리기를 이 시점부터 끊김 없이 이어서 한다.
+            self.canvas.delete("all")
+            self.photo = photo
+            self._pil_img = img   # 스포이드가 이 이미지에서 픽셀을 직접 읽는다
+            self._img_w, self._img_h = iw, ih
             # 부드러운 그림자
             for d, col in [(8,SH1),(5,SH2),(2,"#F2F2F2")]:
                 self.canvas.create_rectangle(
@@ -1805,6 +1833,7 @@ class PreviewWin(tk.Toplevel):
             self._draw_annots(pg)
             self.layer_panel.refresh()
         except Exception as e:
+            self.canvas.delete("all")
             self.canvas.create_text(cw//2, ch//2, text=f"오류:\n{e}",
                                     fill="#a88", font=FONT, justify="center")
 
@@ -1821,6 +1850,18 @@ class PreviewWin(tk.Toplevel):
         self.zoom = max(0.25, min(4.0, self.zoom * factor))
         self.zoom_lbl.config(text=f"{int(self.zoom*100)}%")
         self._show()
+
+    def _zoom_wheel(self, factor):
+        """마우스 휠은 한 번 굴리면 짧은 시간에 여러 틱이 연달아 들어오기
+        쉽다 — 틱마다 무거운 PDF 재렌더링(_show, fitz 로 다시 래스터화)을
+        전부 하면 그 자체가 버벅임/깜빡임처럼 보인다. 배율 표시(%)는
+        즉시 갱신해 반응은 즉각적으로 느껴지게 하되, 실제 재렌더링은
+        스크롤이 잠깐이라도 멈췄을 때 한 번만 하도록 짧게 모은다
+        (_on_resize 의 디바운스와 동일한 방식)."""
+        self.zoom = max(0.25, min(4.0, self.zoom * factor))
+        self.zoom_lbl.config(text=f"{int(self.zoom*100)}%")
+        if self._zoom_rid: self.after_cancel(self._zoom_rid)
+        self._zoom_rid = self.after(40, self._show)
 
     # ── 방향키: 선택된 텍스트가 있으면 이동, 없으면 페이지 이동 ─────
     def _on_key_left(self):
@@ -1969,7 +2010,7 @@ class PreviewWin(tk.Toplevel):
                      "x0": min(x0_pt,x1_pt), "y0": min(y0_pt,y1_pt),
                      "x1": max(x0_pt,x1_pt), "y1": max(y0_pt,y1_pt),
                      "line_color": DEFAULT_RECT_LINE_COLOR, "line_width": DEFAULT_SHAPE_LINE_WIDTH,
-                     "fill_color": DEFAULT_SHAPE_FILL_COLOR, "fill_enabled": False}
+                     "fill_color": DEFAULT_SHAPE_FILL_COLOR, "fill_enabled": True}
         elif tool == "highlight":
             annot = {"id": next(_id_gen), "type": "highlight",
                      "x0": min(x0_pt,x1_pt), "y0": min(y0_pt,y1_pt),
@@ -2077,10 +2118,21 @@ class PreviewWin(tk.Toplevel):
 
     # ── 스포이드(색상 추출) ──────────────────────────────────
     def _start_eyedropper(self, apply_fn):
-        """스포이드 모드로 전환한다. 다음 캔버스 클릭에서 그 지점의
-        색을 읽어 apply_fn(hexcol) 을 호출하고 원래 도구로 돌아간다."""
+        """스포이드 모드로 전환한다. 켜져 있는 동안은 캔버스를 클릭할
+        때마다 그 지점의 색을 읽어 apply_fn(hexcol) 을 호출하며, 여러
+        번 찍어보면서 원하는 색을 찾을 수 있게 모드가 계속 유지된다.
+        Esc 를 누르거나 스포이드 버튼을 한 번 더 누르면 꺼진다."""
         self._eyedropper_target = apply_fn
         self.canvas.config(cursor="tcross")
+
+    def _toggle_eyedropper(self, apply_fn):
+        """스포이드 버튼을 눌렀을 때 호출한다. 이미 같은 대상으로 스포이드
+        모드 중이면 끄고(토글), 아니면(꺼져 있거나 다른 색 대상이면) 그
+        대상으로 새로 시작한다."""
+        if self._eyedropper_target == apply_fn:
+            self._cancel_eyedropper()
+        else:
+            self._start_eyedropper(apply_fn)
 
     def _cancel_eyedropper(self):
         self._eyedropper_target = None
@@ -2091,7 +2143,9 @@ class PreviewWin(tk.Toplevel):
             self._cancel_eyedropper()
 
     def _pick_pixel_color(self, e):
-        """스포이드 모드에서 캔버스 클릭 지점의 색을 읽어 적용한다."""
+        """스포이드 모드에서 캔버스 클릭 지점의 색을 읽어 적용한다.
+        여러 번 찍어볼 수 있도록 적용 후에도 스포이드 모드를 그대로
+        유지한다(Esc/버튼 재클릭으로만 꺼짐)."""
         fn = self._eyedropper_target
         img = self._pil_img
         if fn is None or img is None or self._img_w is None:
@@ -2099,10 +2153,8 @@ class PreviewWin(tk.Toplevel):
             return
         ix = int(e.x - (self._cx - self._img_w/2))
         iy = int(e.y - (self._cy - self._img_h/2))
-        self._eyedropper_target = None
-        self._set_tool(self.tool)
         if not (0 <= ix < self._img_w and 0 <= iy < self._img_h):
-            return   # 이미지 바깥을 클릭하면 조용히 취소
+            return   # 페이지 이미지 바깥을 클릭하면 무시하고 계속 스포이드 모드 유지
         r, g, b = img.getpixel((ix, iy))[:3]
         fn(f"#{r:02x}{g:02x}{b:02x}")
 
@@ -2236,9 +2288,10 @@ class PreviewWin(tk.Toplevel):
         지점과 같아서(특히 방금 만든 자리를 그대로 클릭하는 경우),
         핸들을 놓으면 이동 클릭과 부딪히고, 애초에 그 점을 기준으로
         크기를 조절하는 것도 의미가 없다(배율이 0에 가까워짐)."""
-        items = self.canvas.find_withtag(f"annot_{a['id']}")
-        if not items: return None
-        bbox = self.canvas.bbox(items[0])
+        # 글자 하나하나가 별도 아이템일 수 있으므로(측정 기반 그리기),
+        # 특정 아이템 하나가 아니라 태그로 물어서 전체 bbox 를 얻는다 —
+        # canvas.bbox() 는 item id 뿐 아니라 태그도 그대로 받아들인다.
+        bbox = self.canvas.bbox(f"annot_{a['id']}")
         if not bbox: return None
         x0, y0, x1, y1 = bbox
         anchor_sx, anchor_sy = pdf_to_screen(a["x"], a["y"], self._cur_pw, self._cur_ph,
@@ -2495,6 +2548,18 @@ class PreviewWin(tk.Toplevel):
             elif t == "arrow":
                 self._draw_arrow_annot(a)
 
+    def _resolve_preview_font(self, family, bold, italic):
+        """내보내기(_bake_text_annot)와 똑같은 폰트 탐색 로직
+        (_resolve_annot_font)을 그대로 써서, 실제로 어떤 폰트로
+        내보내질지와 동일한 기준으로 편집 화면에서도 글자 폭을 잰다.
+        Windows 레지스트리 조회를 포함해 비용이 있으므로 창 단위로
+        캐싱한다."""
+        key = (family, bold, italic)
+        if key not in self._preview_font_cache:
+            self._preview_font_cache[key] = _resolve_annot_font(
+                family, bold, italic, alias=f"P{len(self._preview_font_cache)}")
+        return self._preview_font_cache[key]
+
     def _draw_text_annot(self, a):
         px, py = pdf_to_screen(a["x"], a["y"], self._cur_pw, self._cur_ph,
                                 self._cur_rot, self._sc, self._cx, self._cy)
@@ -2510,22 +2575,95 @@ class PreviewWin(tk.Toplevel):
         # 반시계방향(+)이라, 이 프로그램의 페이지 회전 규약(시계방향 +)과
         # 표시 방향을 통일하기 위해 부호를 반전해서 넘긴다.
         angle = (-a.get("rotation", 0.0)) % 360
+        align = a.get("align", "left")
         # 정렬(align)은 X 좌표를 기준선으로 해서 텍스트가 좌/가운데/우측 중
         # 어느 쪽을 그 선에 맞출지 결정한다 — anchor 를 그에 맞게 바꾸고
         # justify 를 같이 쓰면, 여러 줄일 때도 각 줄이 (너비가 달라도) 이
         # 기준선에 맞춰 정렬된다(anchor 로 정한 기준점이 가장 넓은 줄
         # 기준으로 잡히고, justify 가 그 안에서 각 줄을 맞추기 때문에
         # 결과적으로 모든 줄이 X 기준선에 정렬됨).
-        anchor = {"left": "nw", "center": "n", "right": "ne"}.get(a.get("align", "left"), "nw")
+        anchor = {"left": "nw", "center": "n", "right": "ne"}.get(align, "nw")
+        tag = f"annot_{a['id']}"
+
+        # 회전이 없을 때는 Tk 의 자체 텍스트 레이아웃에 통째로 맡기지
+        # 않고, 내보내기 때(_bake_text_annot) 쓰는 것과 똑같은 PyMuPDF
+        # 글자 폭 측정으로 글자 하나하나의 위치를 직접 계산해서 그린다.
+        # ("korea"/"helv" 내장 폰트로 대체될 때도 마찬가지로 적용한다 —
+        # 실측 결과 그 내장 폰트는 모든 글자를 font_size 와 같은 폭의
+        # 정사각형 칸에 그려서(라틴 글자도 예외 없이) 실제로 그렇게
+        # 넓게 벌어져 나온다. Tk 의 예쁜 비례 폰트로 대체해서 보여주면
+        # 편집 화면은 멀쩡해 보이다가 내보낸 뒤에야 이 간격을 보게 되는
+        # 게 바로 사용자가 겪은 문제이므로, 못생겨 보이더라도 실제
+        # 결과를 그대로 보여주는 쪽을 택한다.) 회전된 텍스트는 회전
+        # 합성까지 글자 단위로 계산하는 게 범위 밖이라 기존 방식 그대로
+        # Tk 통짜 렌더링(angle 파라미터)을 쓴다.
+        if angle == 0 and PREVIEW_OK:
+            item = self._draw_text_annot_measured(a, px, py, size_pt, style, align, tag)
+            if item is not None:
+                self._draw_sel_outline_if_needed(a, item)
+                return
+
         try:
             item = self.canvas.create_text(
                 px, py, text=a.get("text", ""), anchor=anchor,
                 font=font_spec, fill=a.get("color", DEFAULT_ANNOT_COLOR),
-                justify=a.get("align", "left"), angle=angle,
-                tags=(f"annot_{a['id']}", "annot"))
+                justify=align, angle=angle,
+                tags=(tag, "annot"))
         except Exception:
             return
         self._draw_sel_outline_if_needed(a, item)
+
+    def _draw_text_annot_measured(self, a, px, py, size_pt, style, align, tag):
+        """글자 하나하나를 PyMuPDF 폭 측정 기준으로 위치를 잡아 그린다
+        (실제 폰트 파일을 찾았으면 그 파일 기준, 못 찾았으면 내보내기와
+        똑같이 "korea"/"helv" 내장 폰트 기준). 문자 하나마다 별도 canvas
+        아이템이 되므로(단일 item id로는 전체 bbox 를 구할 수 없음),
+        선택/핸들/히트테스트는 전부 item id 대신 태그 문자열
+        (annot_<id>)로 다뤄야 한다 — canvas.bbox()/find_*()는 태그도
+        그대로 받아들이므로 호출부는 이 반환값을 그 자리에 쓰면 된다.
+        측정/폰트 로딩에 실패하면(None 반환) 호출부가 기존 Tk 통짜
+        렌더링으로 대신한다."""
+        font_family = a.get("font", DEFAULT_ANNOT_FONT)
+        color = a.get("color", DEFAULT_ANNOT_COLOR)
+        font_spec = (font_family, -max(1, int(round(size_pt * self._sc))), style)
+        lines = (a.get("text", "") or "").split("\n")
+        drew_any = False
+        try:
+            font, fontfile, fontname = self._resolve_preview_font(
+                font_family, bool(a.get("bold")), bool(a.get("italic")))
+            line_height_pt = size_pt * 1.2
+            for i, line in enumerate(lines):
+                if line:
+                    if fontfile:
+                        char_widths = [font.text_length(ch, fontsize=size_pt) for ch in line]
+                    else:
+                        char_widths = [fitz.get_text_length(ch, fontname=fontname, fontsize=size_pt)
+                                       for ch in line]
+                    line_w = sum(char_widths)
+                else:
+                    char_widths, line_w = [], 0.0
+                if align == "center": start_dx = -line_w / 2
+                elif align == "right": start_dx = -line_w
+                else: start_dx = 0.0
+                cum = 0.0
+                for ch, w in zip(line, char_widths):
+                    sx = px + (start_dx + cum) * self._sc
+                    sy = py + (i * line_height_pt) * self._sc
+                    self.canvas.create_text(sx, sy, text=ch, anchor="nw",
+                                             font=font_spec, fill=color, tags=(tag, "annot"))
+                    drew_any = True
+                    cum += w
+        except Exception:
+            drew_any = False
+        if not drew_any:
+            # 측정/그리기가 하나도 안 됐으면(빈 텍스트 포함) 기존처럼
+            # 선택 가능한 빈 아이템 하나는 남겨 둔다.
+            try:
+                self.canvas.create_text(px, py, text="", anchor="nw",
+                                         font=font_spec, fill=color, tags=(tag, "annot"))
+            except Exception:
+                return None
+        return tag
 
     def _shape_screen_corners(self, a):
         sx0, sy0 = pdf_to_screen(a["x0"], a["y0"], self._cur_pw, self._cur_ph,

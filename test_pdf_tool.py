@@ -582,8 +582,12 @@ class TestPropertyPanel(unittest.TestCase):
         panel.text_var.set("검사완료 OK")
         panel._apply_text()
         self.assertEqual(annot["text"], "검사완료 OK")
+        # 회전 없는 텍스트는 글자마다 별도 canvas 아이템으로 그려지므로
+        # (PyMuPDF 폭 측정 기준 배치), 공백을 뺀 글자를 순서대로 이어
+        # 붙여서 확인한다.
         items = pw.canvas.find_withtag(f"annot_{annot['id']}")
-        self.assertEqual(pw.canvas.itemcget(items[0], "text"), "검사완료 OK")
+        drawn = "".join(pw.canvas.itemcget(it, "text") for it in items)
+        self.assertEqual(drawn, "검사완료 OK")
 
     def test_font_size_change_reflected(self):
         pages = self._make_pages()
@@ -756,19 +760,25 @@ class TestPropertyPanel(unittest.TestCase):
     # ── 정렬을 바꿔도 저장된 X/Y 좌표 자체는 그대로(기준선 역할) ──
     def test_xy_unchanged_but_anchor_follows_align(self):
         """정렬(좌/가운데/우측)은 annot 에 저장된 X 좌표를 바꾸지 않는다
-        — 대신 그 X 를 기준선으로 삼아 텍스트가 어느 쪽을 그 선에 맞출지
-        (anchor) 만 바뀐다."""
+        — 대신 그 X 를 기준선으로 삼아 텍스트가 화면에서 어느 쪽을 그
+        선에 맞출지만 바뀐다."""
         pages = self._make_pages()
         pw, annot = self._open_preview_with_text(pages)
         x_before, y_before = annot["x"], annot["y"]
         panel = pw.prop_panel
-        expect_anchor = {"left": "nw", "center": "n", "right": "ne"}
+        anchor_sx, _ = pt.pdf_to_screen(annot["x"], annot["y"], pw._cur_pw, pw._cur_ph,
+                                         pw._cur_rot, pw._sc, pw._cx, pw._cy)
         for key in ("left", "center", "right"):
             panel._set_align(key)
             self.assertEqual(annot["x"], x_before)
             self.assertEqual(annot["y"], y_before)
-            items = pw.canvas.find_withtag(f"annot_{annot['id']}")
-            self.assertEqual(pw.canvas.itemcget(items[0], "anchor"), expect_anchor[key])
+            left, _, right, _ = pw.canvas.bbox(f"annot_{annot['id']}")
+            if key == "left":
+                self.assertAlmostEqual(left, anchor_sx, delta=2)
+            elif key == "right":
+                self.assertAlmostEqual(right, anchor_sx, delta=2)
+            else:
+                self.assertAlmostEqual((left + right) / 2, anchor_sx, delta=2)
 
     # ── 페이지 복제 시 새 필드도 독립적으로 복사되는지 ─────────
     def test_duplicate_page_copies_new_fields_independently(self):
@@ -805,6 +815,25 @@ class TestPropertyPanel(unittest.TestCase):
         # 페이지 회전 (기존 버튼)
         pw._rotate(90)
         self.assertEqual(pages[0]["rot"], 90)
+
+    def test_zoom_wheel_coalesces_rapid_ticks_into_one_rerender(self):
+        """마우스 휠로 연속 스크롤해도 무거운 재렌더링(_show, PDF
+        재래스터화)은 매 틱마다가 아니라 한 번만 예약되어야 한다 —
+        이전 예약을 취소하고 새로 거는 디바운스로 확대/축소 중
+        깜빡임/버벅임을 줄인다. 배율(%) 자체는 매 틱마다 즉시 갱신돼
+        반응성은 그대로 유지된다."""
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        zoom_before = pw.zoom
+        with patch.object(pw, "after", wraps=pw.after) as mock_after, \
+             patch.object(pw, "after_cancel", wraps=pw.after_cancel) as mock_cancel:
+            pw._zoom_wheel(1.15)
+            pw._zoom_wheel(1.15)
+            pw._zoom_wheel(1.15)
+        self.assertAlmostEqual(pw.zoom, zoom_before * 1.15**3, places=4,
+            msg="배율 표시는 디바운스와 무관하게 매 틱마다 즉시 갱신되어야 함")
+        self.assertEqual(mock_after.call_count, 3, "재렌더링 예약 자체는 매 틱마다 새로 걸림")
+        self.assertEqual(mock_cancel.call_count, 2, "다음 틱이 오면 직전 예약은 취소되어야 함")
 
 
 # ══════════════════════════════════════════════════════════
@@ -845,7 +874,7 @@ class TestPhase4ExtraVerification(unittest.TestCase):
     # ── 1. 정렬을 바꿔도 저장된 X/Y 좌표 자체는 그대로(기준선 역할) ──
     def test_xy_anchor_unaffected_by_alignment(self):
         """정렬은 저장된 X 좌표를 바꾸지 않는다 — 그 X 를 기준선 삼아
-        텍스트가 좌/가운데/우측 중 어느 쪽을 맞출지(anchor)만 바뀐다."""
+        텍스트가 화면에서 좌/가운데/우측 중 어느 쪽을 맞출지만 바뀐다."""
         pages = self._load(self.pdf_path_a4)
         pw = self._open(pages)
         pw._toggle_edit(); pw._set_tool("text")
@@ -853,13 +882,19 @@ class TestPhase4ExtraVerification(unittest.TestCase):
         annot = pages[0]["annots"][0]
         x0, y0 = annot["x"], annot["y"]
         panel = pw.prop_panel
-        expect_anchor = {"left": "nw", "center": "n", "right": "ne"}
+        anchor_sx, _ = pt.pdf_to_screen(annot["x"], annot["y"], pw._cur_pw, pw._cur_ph,
+                                         pw._cur_rot, pw._sc, pw._cx, pw._cy)
         for key in ("left", "center", "right"):
             panel._set_align(key)
             self.assertEqual(annot["x"], x0)
             self.assertEqual(annot["y"], y0)
-            items = pw.canvas.find_withtag(f"annot_{annot['id']}")
-            self.assertEqual(pw.canvas.itemcget(items[0], "anchor"), expect_anchor[key])
+            left, _, right, _ = pw.canvas.bbox(f"annot_{annot['id']}")
+            if key == "left":
+                self.assertAlmostEqual(left, anchor_sx, delta=2)
+            elif key == "right":
+                self.assertAlmostEqual(right, anchor_sx, delta=2)
+            else:
+                self.assertAlmostEqual((left + right) / 2, anchor_sx, delta=2)
 
     # ── 2/3. 페이지 회전 vs 텍스트 회전 완전 분리 + 0/90/180/270 실측 ──
     def test_page_and_text_rotation_are_fully_independent_all_angles(self):
@@ -1945,15 +1980,23 @@ class TestShapeAnnots(unittest.TestCase):
         panel.annot["line_color"] = "#00FF00"  # 색상선택 다이얼로그 없이 직접 확인
         self.assertEqual(a["line_color"], "#00FF00")
 
+    def test_new_rect_defaults_to_filled(self):
+        """새로 그리는 사각형은 채움이 기본으로 켜져 있어야 한다 —
+        가림/강조 용도로 바로 쓸 수 있게."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "rect", (300, 300), (400, 380))
+        self.assertTrue(pages[0]["annots"][0].get("fill_enabled"))
+
     def test_shape_panel_fill_toggle_applies(self):
         pages = self._make_pages()
         pw = self._open_preview(pages)
         self._drag_create(pw, "rect", (300, 300), (400, 380))
         panel = pw.shape_panel
-        self.assertFalse(pages[0]["annots"][0].get("fill_enabled"))
-        panel.fill_enabled_var.set(True)
+        self.assertTrue(pages[0]["annots"][0].get("fill_enabled"))
+        panel.fill_enabled_var.set(False)
         panel._apply_fill_enabled()
-        self.assertTrue(pages[0]["annots"][0]["fill_enabled"])
+        self.assertFalse(pages[0]["annots"][0]["fill_enabled"])
 
     def test_arrow_panel_hides_fill_section(self):
         pages = self._make_pages()
@@ -2247,7 +2290,9 @@ class TestEyedropper(unittest.TestCase):
         pw._on_canvas_motion(FakeEvent(x=p1[0], y=p1[1]))
         pw._on_canvas_release(FakeEvent(x=p1[0], y=p1[1]))
 
-    def test_eyedropper_applies_sampled_color_to_text(self):
+    def test_eyedropper_applies_sampled_color_to_text_and_stays_active(self):
+        """한 번 찍고 끝나는 게 아니라, 여러 번 찍어보면서 색을 고를 수
+        있도록 스포이드 모드가 계속 유지되어야 한다."""
         pages = self._make_pages()
         pw = self._open_preview(pages)
         pw._set_tool("text")
@@ -2261,7 +2306,23 @@ class TestEyedropper(unittest.TestCase):
 
         self.assertEqual(annot["color"], "#ffffff")
         self.assertEqual(pw.prop_panel.color_btn.cget("bg"), "#ffffff")
-        self.assertIsNone(pw._eyedropper_target, "색을 적용한 뒤에는 스포이드 모드가 꺼져야 함")
+        self.assertIsNotNone(pw._eyedropper_target,
+            "한 번 찍은 뒤에도 스포이드 모드가 계속 유지되어야 여러 번 찍어볼 수 있음")
+
+        # 다시 찍어도(값이 같더라도) 계속 스포이드 모드
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        self.assertIsNotNone(pw._eyedropper_target)
+
+    def test_eyedropper_button_again_toggles_off(self):
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+
+        pw.prop_panel._eyedrop_color()
+        self.assertIsNotNone(pw._eyedropper_target)
+        pw.prop_panel._eyedrop_color()   # 같은 버튼을 한 번 더
+        self.assertIsNone(pw._eyedropper_target, "스포이드 버튼을 다시 누르면 꺼져야 함")
 
     def test_eyedropper_applies_sampled_color_to_shape_line(self):
         pages = self._make_pages()
@@ -2276,7 +2337,7 @@ class TestEyedropper(unittest.TestCase):
         self.assertEqual(annot["line_color"], "#ffffff")
         self.assertEqual(pw.shape_panel.line_color_btn.cget("bg"), "#ffffff")
 
-    def test_eyedropper_click_outside_page_cancels_without_applying(self):
+    def test_eyedropper_click_outside_page_ignored_but_stays_active(self):
         pages = self._make_pages()
         pw = self._open_preview(pages)
         pw._set_tool("text")
@@ -2288,7 +2349,8 @@ class TestEyedropper(unittest.TestCase):
         pw._on_canvas_press(FakeEvent(x=2, y=2))   # 캔버스는 있지만 페이지 이미지 바깥
 
         self.assertEqual(annot["color"], "#123456", "페이지 밖을 클릭하면 색이 바뀌면 안 됨")
-        self.assertIsNone(pw._eyedropper_target, "실패해도 스포이드 모드는 꺼져야 함")
+        self.assertIsNotNone(pw._eyedropper_target,
+            "페이지 밖을 클릭해도 스포이드 모드가 꺼지면 안 됨(계속 찾아볼 수 있어야 함)")
 
     def test_escape_cancels_eyedropper(self):
         pages = self._make_pages()
@@ -2436,6 +2498,139 @@ class TestTextResizeHandles(unittest.TestCase):
 
         pw._undo()
         self.assertAlmostEqual(pages[0]["annots"][0]["font_size"], 20.0, delta=0.01)
+
+
+# ══════════════════════════════════════════════════════════
+#  7-3. 편집 화면 미리보기 텍스트 폭 = 내보내기 측정 폭
+#
+#  Tk 캔버스와 PyMuPDF 는 같은 폰트라도 폭을 다르게 계산해서, 회전 없는
+#  텍스트는 Tk 자체 레이아웃에 맡기지 않고 PyMuPDF 로 잰 글자 폭을 그대로
+#  써서 한 글자씩 그린다(_draw_text_annot_measured). 실제 폰트 파일을
+#  찾았으면 그 파일 기준, 못 찾아 "korea"/"helv" 내장 폰트로 대체되면
+#  내보내기와 똑같이 그 내장 폰트 기준으로 잰다 — 실측 결과 이 내장
+#  폰트는 라틴 글자도 예외 없이 font_size 와 같은 폭의 정사각형 칸에
+#  그려서(예: 18pt 글자는 모든 글자가 정확히 18pt 폭) 실제로 꽤 넓게
+#  벌어져 보이는데, 이게 실제 내보내기 결과이므로(rawdict 로 직접
+#  확인함) 미리보기도 예쁘게 보이려고 Tk 의 비례 폰트로 대체해서
+#  숨기면 안 되고 그대로 보여줘야 한다 — 그래야 "편집 화면은 멀쩡했는데
+#  내보내니 달라졌다"는 놀람이 사라진다. 이 절은 두 경우(실제 폰트 발견
+#  / 내장 폰트 대체) 모두 fitz 측정값과 실제로 일치하는지, 그리고
+#  회전이 있을 때는 기존 방식(Tk 통짜 렌더링)으로 안전하게 대체되는지
+#  확인한다. 테스트에서는 이 저장소가 위치한 리눅스 환경에도 실제 있는
+#  폰트 파일(DejaVu Sans)로 _find_font_file 을 모킹해서 "실제 폰트 파일을
+#  찾은" 경로도 재현해 검증한다.
+# ══════════════════════════════════════════════════════════
+class TestPreviewTextMatchesExportMeasurement(unittest.TestCase):
+    REAL_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pt.TkinterDnD.Tk() if pt.DND_OK else pt.tk.Tk()
+        cls.root.withdraw()
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_textmeasure_test_")
+        cls.pdf_path = os.path.join(cls.tmpdir, "sample.pdf")
+        make_pdf(cls.pdf_path, sizes=((595.28, 841.89),))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _make_pages(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        return ot.pages
+
+    def _open_preview_with_text(self, pages, text, click=(300, 300)):
+        pw = pt.PreviewWin(self.root, pages, 0)
+        pw.update_idletasks(); pw.geometry("1150x820+0+0"); pw.update(); pw._show()
+        self.addCleanup(pw.destroy)
+        pw._toggle_edit()
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=click[0], y=click[1]))
+        annot = pages[0]["annots"][0]
+        annot["text"] = text
+        pw._redraw_annots()
+        return pw, annot
+
+    def _patch_real_font_found(self):
+        """실제 폰트 파일을 찾은 상황(fontfile 있음)을 재현한다."""
+        return patch.object(pt, "_find_font_file", return_value=self.REAL_FONT_PATH)
+
+    def test_preview_width_matches_fitz_measured_width_when_real_font_found(self):
+        """실제 폰트 파일을 찾았을 때는, Tk 자체 레이아웃이 아니라
+        PyMuPDF 로 잰 폭을 그대로 써야 한다 — 그래야 편집 화면에서 본
+        줄 길이와 실제 내보낸 PDF 의 줄 길이가 어긋나지 않는다."""
+        pages = self._make_pages()
+        text = "가나다라마바사아자차카타파하ABCDEFG"
+        with self._patch_real_font_found():
+            pw, annot = self._open_preview_with_text(pages, text)
+            bbox = pw.canvas.bbox(f"annot_{annot['id']}")
+            drawn_width_px = bbox[2] - bbox[0]
+
+            font, fontfile, fontname = pw._resolve_preview_font(
+                annot.get("font", pt.DEFAULT_ANNOT_FONT), False, False)
+            self.assertIsNotNone(fontfile, "테스트 전제(실제 폰트 파일 발견)가 성립해야 함")
+            expected_px = font.text_length(text, fontsize=annot["font_size"]) * pw._sc
+
+        self.assertLess(abs(drawn_width_px - expected_px), expected_px * 0.05,
+            f"측정폭={expected_px}, 실제그려진폭={drawn_width_px}")
+
+    def test_fallback_font_also_uses_measured_positioning(self):
+        """실제 폰트 파일을 못 찾아 korea/helv 내장 폰트로 대체될
+        때도(이 저장소의 리눅스 개발 환경처럼) 글자별 측정 배치를 써야
+        한다 — 이 내장 폰트로 실제 내보낼 때 라틴 글자도 예외 없이
+        font_size 와 같은 폭으로 그려진다는 걸 rawdict 로 직접
+        확인했으므로, 그 실제 결과를 미리보기에도 그대로 반영해야
+        "편집 화면과 결과물이 다르다"는 문제가 진짜로 없어진다."""
+        pages = self._make_pages()
+        text = "ABCDE"
+        pw, annot = self._open_preview_with_text(pages, text)
+        _, fontfile, fontname = pw._resolve_preview_font(
+            annot.get("font", pt.DEFAULT_ANNOT_FONT), False, False)
+        self.assertIsNone(fontfile, "테스트 전제(폰트 파일 없음)가 성립해야 함")
+
+        items = pw.canvas.find_withtag(f"annot_{annot['id']}")
+        self.assertEqual(len(items), len(text), "글자 수만큼 개별 아이템으로 그려져야 함")
+
+        bbox = pw.canvas.bbox(f"annot_{annot['id']}")
+        drawn_width_px = bbox[2] - bbox[0]
+        expected_px = sum(
+            pt.fitz.get_text_length(ch, fontname=fontname, fontsize=annot["font_size"])
+            for ch in text
+        ) * pw._sc
+        self.assertLess(abs(drawn_width_px - expected_px), expected_px * 0.08 + 2,
+            f"측정폭={expected_px}, 실제그려진폭={drawn_width_px}")
+
+    def test_rotated_text_falls_back_to_single_item_even_with_real_font(self):
+        """회전이 있는 텍스트는 실제 폰트 파일을 찾았어도 글자별 측정
+        배치 대신 기존 Tk 통짜 렌더링(angle 파라미터)으로 그려야 한다
+        — 회전까지 글자 단위로 합성하는 건 이번 개선 범위 밖이라,
+        안전하게 기존 동작을 그대로 쓴다."""
+        pages = self._make_pages()
+        with self._patch_real_font_found():
+            pw, annot = self._open_preview_with_text(pages, "회전텍스트")
+            annot["rotation"] = 30.0
+            pw._redraw_annots()
+            items = pw.canvas.find_withtag(f"annot_{annot['id']}")
+        self.assertEqual(len(items), 1, "회전된 텍스트는 단일 아이템으로 그려져야 함")
+
+    def test_unrotated_multichar_text_uses_one_item_per_char_when_real_font_found(self):
+        pages = self._make_pages()
+        with self._patch_real_font_found():
+            pw, annot = self._open_preview_with_text(pages, "ABCDE")
+            items = pw.canvas.find_withtag(f"annot_{annot['id']}")
+        self.assertEqual(len(items), 5)
+
+    def test_empty_text_still_selectable(self):
+        """내용을 다 지워도(빈 문자열) 선택/삭제할 수 있는 아이템이
+        하나는 남아 있어야 한다."""
+        pages = self._make_pages()
+        with self._patch_real_font_found():
+            pw, annot = self._open_preview_with_text(pages, "")
+            items = pw.canvas.find_withtag(f"annot_{annot['id']}")
+        self.assertEqual(len(items), 1)
 
 
 # ══════════════════════════════════════════════════════════
@@ -3343,13 +3538,14 @@ class TestUndoRedo(unittest.TestCase):
         pw = self._open_preview(pages)
         self._drag_create(pw, "rect", (300, 300), (450, 400))
         panel = pw.shape_panel
-        panel.fill_enabled_var.set(True)
+        self.assertTrue(pages[0]["annots"][0]["fill_enabled"], "새 사각형은 채움이 기본값")
+        panel.fill_enabled_var.set(False)
         panel._apply_fill_enabled()
-        self.assertTrue(pages[0]["annots"][0]["fill_enabled"])
-        pw._undo()
         self.assertFalse(pages[0]["annots"][0]["fill_enabled"])
-        pw._redo()
+        pw._undo()
         self.assertTrue(pages[0]["annots"][0]["fill_enabled"])
+        pw._redo()
+        self.assertFalse(pages[0]["annots"][0]["fill_enabled"])
 
     def test_shape_line_color_change_undo_restores(self):
         pages = self._make_pages()
