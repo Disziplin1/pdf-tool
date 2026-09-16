@@ -2630,18 +2630,19 @@ class TestPreviewTextMatchesExportMeasurement(unittest.TestCase):
             f"측정폭={expected_px}, 실제그려진폭={drawn_width_px}")
 
     def test_fallback_font_also_uses_measured_positioning(self):
-        """실제 폰트 파일을 못 찾아 korea/helv 내장 폰트로 대체될
-        때도(이 저장소의 리눅스 개발 환경처럼) 글자별 측정 배치를 써야
-        한다 — 이 내장 폰트로 실제 내보낼 때 라틴 글자도 예외 없이
-        font_size 와 같은 폭으로 그려진다는 걸 rawdict 로 직접
-        확인했으므로, 그 실제 결과를 미리보기에도 그대로 반영해야
-        "편집 화면과 결과물이 다르다"는 문제가 진짜로 없어진다."""
+        """실제 폰트 파일을 못 찾아 내장 폰트로 대체될 때도(이 저장소의
+        리눅스 개발 환경처럼) 글자별 측정 배치를 써야 한다 — 그래야
+        "편집 화면과 결과물이 다르다"는 문제가 진짜로 없어진다. 순수
+        라틴 문자는 "helv"로 대체되어 정상적인(폭이 제각각인) 간격으로
+        나온다."""
         pages = self._make_pages()
         text = "ABCDE"
         pw, annot = self._open_preview_with_text(pages, text)
         _, fontfile, fontname = pw._resolve_preview_font(
-            annot.get("font", pt.DEFAULT_ANNOT_FONT), False, False)
+            annot.get("font", pt.DEFAULT_ANNOT_FONT), False, False,
+            pt._text_needs_cjk_font(text))
         self.assertIsNone(fontfile, "테스트 전제(폰트 파일 없음)가 성립해야 함")
+        self.assertEqual(fontname, "helv", "순수 라틴 문자는 helv 로 대체되어야 함")
 
         items = pw.canvas.find_withtag(f"annot_{annot['id']}")
         self.assertEqual(len(items), len(text), "글자 수만큼 개별 아이템으로 그려져야 함")
@@ -2654,6 +2655,44 @@ class TestPreviewTextMatchesExportMeasurement(unittest.TestCase):
         ) * pw._sc
         self.assertLess(abs(drawn_width_px - expected_px), expected_px * 0.08 + 2,
             f"측정폭={expected_px}, 실제그려진폭={drawn_width_px}")
+
+    def test_digits_do_not_get_wide_monospace_gaps_in_fallback(self):
+        """실사용 신고 사례: 숫자만 입력한 텍스트("123456789")가 대체
+        폰트에서 글자 사이가 크게 벌어져 보였다 — "korea"(한글 지원)
+        내장 폰트는 라틴/숫자 문자도 전부 font_size 와 같은 폭의
+        정사각형 칸에 그리기 때문(rawdict 로 직접 확인함). 한글이 섞여
+        있지 않은 순수 숫자/라틴 텍스트는 "helv"로 대체해 정상적인
+        간격이 나오게 고쳤다."""
+        pages = self._make_pages()
+        text = "123456789"
+        pw, annot = self._open_preview_with_text(pages, text)
+        annot["font_size"] = 30.0
+        pw._redraw_annots()
+
+        _, fontfile, fontname = pw._resolve_preview_font(
+            annot.get("font", pt.DEFAULT_ANNOT_FONT), False, False,
+            pt._text_needs_cjk_font(text))
+        self.assertIsNone(fontfile, "테스트 전제(폰트 파일 없음)가 성립해야 함")
+        self.assertEqual(fontname, "helv", "순수 숫자 텍스트는 korea(모든 문자를 font_size "
+            "폭으로 그림) 대신 helv 로 대체되어야 함")
+
+        bbox = pw.canvas.bbox(f"annot_{annot['id']}")
+        drawn_width_px = bbox[2] - bbox[0]
+        korea_width_px = len(text) * annot["font_size"] * pw._sc   # 예전(고친 전) 방식이라면 이만큼 넓어짐
+        self.assertLess(drawn_width_px, korea_width_px * 0.7,
+            "숫자 9개가 korea 폰트처럼 넓게 벌어지면 안 됨")
+
+    def test_mixed_korean_and_latin_still_uses_korea_fallback(self):
+        """한글이 섞여 있으면(라틴/숫자가 같이 있어도) 한글을 그릴 수
+        없는 helv 대신 korea 를 그대로 써야 한다."""
+        pages = self._make_pages()
+        text = "가격 100원"
+        pw, annot = self._open_preview_with_text(pages, text)
+        _, fontfile, fontname = pw._resolve_preview_font(
+            annot.get("font", pt.DEFAULT_ANNOT_FONT), False, False,
+            pt._text_needs_cjk_font(text))
+        self.assertIsNone(fontfile)
+        self.assertEqual(fontname, "korea")
 
     def test_rotated_text_falls_back_to_single_item_even_with_real_font(self):
         """회전이 있는 텍스트는 실제 폰트 파일을 찾았어도 글자별 측정

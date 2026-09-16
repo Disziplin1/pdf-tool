@@ -387,18 +387,35 @@ def _find_font_file(family, bold=False, italic=False):
     return None
 
 
-def _resolve_annot_font(family, bold, italic, alias):
+def _text_needs_cjk_font(text):
+    """텍스트에 한글 등 라틴-1 범위를 벗어나는 문자가 있는지 확인한다.
+    실제 폰트 파일을 못 찾았을 때 내장 대체 폰트로 "korea"(한글 지원)
+    를 쓸지 "helv"(라틴 문자 폭이 훨씬 자연스러움)를 쓸지 고르는 데
+    쓴다."""
+    return any(ord(ch) > 0xFF for ch in (text or ""))
+
+
+def _resolve_annot_font(family, bold, italic, alias, needs_cjk=True):
     """(fitz.Font, fontfile 경로 또는 None, insert_text 에 넘길 fontname)
-    을 반환한다. 실제 폰트 파일을 못 찾으면 한글을 포함해 폭넓게
-    지원하는 PyMuPDF 내장 CJK 폴백 폰트("korea")로 대체하는데, 이 경우
-    fontname 은 반드시 그 예약된 이름("korea") 그대로 써야 하므로 우리가
-    붙인 별칭(alias) 대신 그 이름을 함께 돌려준다."""
+    을 반환한다. 실제 폰트 파일을 못 찾으면 내장 대체 폰트로 넘어가는데,
+    텍스트에 한글 등이 있으면("needs_cjk") 그걸 지원하는 "korea"를,
+    순수 라틴/숫자 텍스트면 "helv"를 쓴다 — "korea"는 한글은 잘
+    지원하지만 라틴 문자/숫자도 전부 글자 크기와 같은 폭의 정사각형
+    칸에 넣어 그려서(실측으로 확인됨) 숫자만 입력해도 글자 사이가 크게
+    벌어져 보이는 문제가 있었다. 두 대체 폰트 모두 이 이름
+    ("korea"/"helv")을 fontname 으로 그대로 써야 하므로 우리가 붙인
+    별칭(alias) 대신 그 이름을 함께 돌려준다."""
     path = _find_font_file(family, bold, italic)
     try:
         if path:
             return fitz.Font(fontfile=path), path, alias
     except Exception:
         pass
+    if not needs_cjk:
+        try:
+            return fitz.Font(fontname="helv"), None, "helv"
+        except Exception:
+            pass
     try:
         return fitz.Font(fontname="korea"), None, "korea"
     except Exception:
@@ -413,14 +430,16 @@ def _resolve_and_measure_text(a, font_cache):
     family = a.get("font", DEFAULT_ANNOT_FONT)
     bold = bool(a.get("bold"))
     italic = bool(a.get("italic"))
-    cache_key = (family, bold, italic)
+    text = a.get("text", "") or ""
+    needs_cjk = _text_needs_cjk_font(text)
+    cache_key = (family, bold, italic, needs_cjk)
     if cache_key not in font_cache:
         font_cache[cache_key] = _resolve_annot_font(
-            family, bold, italic, alias=f"F{len(font_cache)}")
+            family, bold, italic, alias=f"F{len(font_cache)}", needs_cjk=needs_cjk)
     font, fontfile, fontname = font_cache[cache_key]
 
     size = a.get("font_size", DEFAULT_ANNOT_SIZE)
-    lines = (a.get("text", "") or "").split("\n")
+    lines = text.split("\n")
     try:
         ascent = size * (font.ascender or 0.8)
     except Exception:
@@ -2555,16 +2574,17 @@ class PreviewWin(tk.Toplevel):
             elif t == "arrow":
                 self._draw_arrow_annot(a)
 
-    def _resolve_preview_font(self, family, bold, italic):
+    def _resolve_preview_font(self, family, bold, italic, needs_cjk=True):
         """내보내기(_bake_text_annot)와 똑같은 폰트 탐색 로직
         (_resolve_annot_font)을 그대로 써서, 실제로 어떤 폰트로
         내보내질지와 동일한 기준으로 편집 화면에서도 글자 폭을 잰다.
         Windows 레지스트리 조회를 포함해 비용이 있으므로 창 단위로
-        캐싱한다."""
-        key = (family, bold, italic)
+        캐싱한다(한글 포함 여부에 따라 대체 폰트가 달라질 수 있어
+        needs_cjk 도 캐시 키에 포함)."""
+        key = (family, bold, italic, needs_cjk)
         if key not in self._preview_font_cache:
             self._preview_font_cache[key] = _resolve_annot_font(
-                family, bold, italic, alias=f"P{len(self._preview_font_cache)}")
+                family, bold, italic, alias=f"P{len(self._preview_font_cache)}", needs_cjk=needs_cjk)
         return self._preview_font_cache[key]
 
     def _draw_text_annot(self, a):
@@ -2580,10 +2600,11 @@ class PreviewWin(tk.Toplevel):
         # 굵게 나오는데 내보내니 그냥 보통 글씨"인 것도 똑같은 종류의
         # 어긋남이라, 대체 폰트일 때는 미리보기도 보통 굵기/기울임 없이
         # 보여준다.
+        needs_cjk = _text_needs_cjk_font(a.get("text", ""))
         fontfile_found = None
         if PREVIEW_OK:
             try:
-                _, fontfile_found, _ = self._resolve_preview_font(family, bold, italic)
+                _, fontfile_found, _ = self._resolve_preview_font(family, bold, italic, needs_cjk)
             except Exception:
                 fontfile_found = None
         show_bold, show_italic = (bold, italic) if fontfile_found else (False, False)
@@ -2650,11 +2671,13 @@ class PreviewWin(tk.Toplevel):
         font_family = a.get("font", DEFAULT_ANNOT_FONT)
         color = a.get("color", DEFAULT_ANNOT_COLOR)
         font_spec = (font_family, -max(1, int(round(size_pt * self._sc))), style)
-        lines = (a.get("text", "") or "").split("\n")
+        text = a.get("text", "") or ""
+        lines = text.split("\n")
         drew_any = False
         try:
             font, fontfile, fontname = self._resolve_preview_font(
-                font_family, bool(a.get("bold")), bool(a.get("italic")))
+                font_family, bool(a.get("bold")), bool(a.get("italic")),
+                _text_needs_cjk_font(text))
             line_height_pt = size_pt * 1.2
             for i, line in enumerate(lines):
                 if line:
