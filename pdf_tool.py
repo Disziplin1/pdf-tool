@@ -2563,13 +2563,30 @@ class PreviewWin(tk.Toplevel):
     def _draw_text_annot(self, a):
         px, py = pdf_to_screen(a["x"], a["y"], self._cur_pw, self._cur_ph,
                                 self._cur_rot, self._sc, self._cx, self._cy)
+        family = a.get("font", DEFAULT_ANNOT_FONT)
+        bold, italic = bool(a.get("bold")), bool(a.get("italic"))
+        # 실제 폰트 파일을 못 찾아 "korea"/"helv" 내장 폰트로 대체될 때는
+        # 그 폰트에 굵게/기울임 버전이 아예 없어서(_resolve_annot_font 는
+        # bold/italic 값과 무관하게 항상 같은 이름을 돌려줌), 체크박스를
+        # 켜도 실제로 내보낸 PDF에는 반영되지 않는다. 미리보기에서
+        # Tk 가 자체적으로 굵게/기울임을 합성해 보여주면 "편집 화면엔
+        # 굵게 나오는데 내보내니 그냥 보통 글씨"인 것도 똑같은 종류의
+        # 어긋남이라, 대체 폰트일 때는 미리보기도 보통 굵기/기울임 없이
+        # 보여준다.
+        fontfile_found = None
+        if PREVIEW_OK:
+            try:
+                _, fontfile_found, _ = self._resolve_preview_font(family, bold, italic)
+            except Exception:
+                fontfile_found = None
+        show_bold, show_italic = (bold, italic) if fontfile_found else (False, False)
         style_parts = []
-        if a.get("bold"):   style_parts.append("bold")
-        if a.get("italic"): style_parts.append("italic")
+        if show_bold:   style_parts.append("bold")
+        if show_italic: style_parts.append("italic")
         style = " ".join(style_parts) if style_parts else "normal"
         size_pt = a.get("font_size", DEFAULT_ANNOT_SIZE)
         size_px = max(1, int(round(size_pt * self._sc)))   # 음수=픽셀 크기(줌에 정확히 비례)
-        font_spec = (a.get("font", DEFAULT_ANNOT_FONT), -size_px, style)
+        font_spec = (family, -size_px, style)
         # 텍스트 자체 회전(annot["rotation"])과 페이지 회전(pg["rot"])은
         # 서로 별개의 값이며 섞이지 않는다. tk canvas 의 angle 은
         # 반시계방향(+)이라, 이 프로그램의 페이지 회전 규약(시계방향 +)과
@@ -2692,10 +2709,18 @@ class PreviewWin(tk.Toplevel):
 
     def _draw_arrow_annot(self, a):
         sx0, sy0, sx1, sy1 = self._shape_screen_corners(a)
-        lw = max(1, int(round(a.get("line_width", DEFAULT_SHAPE_LINE_WIDTH) * self._sc)))
+        line_width = a.get("line_width", DEFAULT_SHAPE_LINE_WIDTH)
+        lw = max(1, int(round(line_width * self._sc)))
+        # 화살촉 크기는 내보내기(_draw_arrow_pdf)와 같은 공식(선 굵기에
+        # 비례)으로 계산해 화면 배율(self._sc)만큼 픽셀로 환산한다.
+        # 예전에는 화살촉이 (10,12,4) 고정 픽셀이라, 선을 굵게 하거나
+        # 확대해도 편집 화면에서는 화살촉 크기가 그대로라 실제로 내보낸
+        # PDF와 비율이 달라 보였다.
+        head_len_px = max(8.0, line_width * 4) * self._sc
+        head_w_px = max(5.0, line_width * 2.5) * self._sc
         item = self.canvas.create_line(
             sx0, sy0, sx1, sy1, fill=a.get("line_color", DEFAULT_SHAPE_LINE_COLOR),
-            width=lw, arrow="last", arrowshape=(10,12,4),
+            width=lw, arrow="last", arrowshape=(head_len_px, head_len_px, head_w_px * 2),
             tags=(f"annot_{a['id']}", "annot"))
         self._draw_sel_outline_if_needed(a, item)
 

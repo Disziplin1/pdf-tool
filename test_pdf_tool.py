@@ -1888,6 +1888,37 @@ class TestShapeAnnots(unittest.TestCase):
         self.assertEqual(a["type"], "highlight")
         self.assertEqual(a.get("fill_color"), pt.DEFAULT_HIGHLIGHT_COLOR)
 
+    def test_arrowhead_size_scales_with_line_width_and_zoom(self):
+        """화살촉 크기가 옛날처럼 고정 픽셀이면, 선을 굵게 하거나 화면을
+        확대해도 편집 화면의 화살촉은 그대로라 실제 내보낸 PDF(화살촉이
+        선 굵기에 비례해 커짐, _draw_arrow_pdf)와 비율이 달라 보인다.
+        내보내기와 같은 공식으로 계산해 화면 배율만큼 커져야 한다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        self._drag_create(pw, "arrow", (300, 300), (450, 300))
+        annot = pages[0]["annots"][0]
+
+        panel = pw.shape_panel
+        panel.line_width_var.set("2.0")
+        panel._apply_line_width()
+        item = pw.canvas.find_withtag(f"annot_{annot['id']}")[0]
+        thin_shape = pw.canvas.itemcget(item, "arrowshape")
+
+        panel.line_width_var.set("10.0")
+        panel._apply_line_width()
+        item = pw.canvas.find_withtag(f"annot_{annot['id']}")[0]
+        thick_shape = pw.canvas.itemcget(item, "arrowshape")
+
+        thin_vals = [float(v) for v in thin_shape.split()]
+        thick_vals = [float(v) for v in thick_shape.split()]
+        self.assertGreater(thick_vals[0], thin_vals[0],
+            "선이 굵어지면 화살촉도(내보내기처럼) 커져야 함")
+
+        expected_len = max(8.0, 10.0 * 4) * pw._sc
+        expected_w = max(5.0, 10.0 * 2.5) * pw._sc * 2
+        self.assertAlmostEqual(thick_vals[0], expected_len, delta=0.5)
+        self.assertAlmostEqual(thick_vals[2], expected_w, delta=0.5)
+
     def test_tiny_drag_does_not_create_shape(self):
         pages = self._make_pages()
         pw = self._open_preview(pages)
@@ -2631,6 +2662,40 @@ class TestPreviewTextMatchesExportMeasurement(unittest.TestCase):
             pw, annot = self._open_preview_with_text(pages, "")
             items = pw.canvas.find_withtag(f"annot_{annot['id']}")
         self.assertEqual(len(items), 1)
+
+    def test_bold_ignored_in_preview_when_fallback_font_has_no_bold_variant(self):
+        """"korea"/"helv" 내장 폰트는 굵게/기울임 버전이 따로 없어서
+        (_resolve_annot_font 가 bold/italic 값과 무관하게 항상 같은
+        이름을 반환), 체크박스를 켜도 실제로 내보낸 PDF에는 반영되지
+        않는다. 미리보기에서 Tk 가 자체적으로 굵게 합성해 보여주면
+        "편집 화면엔 굵게 나오는데 내보내니 보통 글씨"인 어긋남이
+        생기므로, 대체 폰트일 때는 미리보기도 보통 굵기로 보여줘야
+        한다."""
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages, "A")
+        _, fontfile, _ = pw._resolve_preview_font(
+            annot.get("font", pt.DEFAULT_ANNOT_FONT), False, False)
+        self.assertIsNone(fontfile, "테스트 전제(폰트 파일 없음)가 성립해야 함")
+
+        annot["bold"] = True
+        pw._redraw_annots()
+        item = pw.canvas.find_withtag(f"annot_{annot['id']}")[0]
+        font_spec = pw.canvas.itemcget(item, "font")
+        self.assertNotIn("bold", font_spec.lower(),
+            "대체 폰트일 때는 굵게 체크박스가 미리보기에 반영되면 안 됨")
+
+    def test_bold_applied_in_preview_when_real_font_found(self):
+        """실제 폰트 파일을 찾았을 때는(_find_font_file 이 bold 전용
+        파일을 찾아줄 수 있으므로) 굵게 체크박스가 미리보기에도
+        정상적으로 반영되어야 한다."""
+        pages = self._make_pages()
+        with self._patch_real_font_found():
+            pw, annot = self._open_preview_with_text(pages, "A")
+            annot["bold"] = True
+            pw._redraw_annots()
+            item = pw.canvas.find_withtag(f"annot_{annot['id']}")[0]
+            font_spec = pw.canvas.itemcget(item, "font")
+        self.assertIn("bold", font_spec.lower())
 
 
 # ══════════════════════════════════════════════════════════
