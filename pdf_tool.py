@@ -1960,6 +1960,13 @@ class PreviewWin(tk.Toplevel):
         self._pan_move(e)
 
     def _on_canvas_release(self, e):
+        if self._eyedropper_target is not None:
+            # 스포이드 모드에서는 press 단계에서 이미 처리(픽셀 채취)가
+            # 끝나 있고 팬/드래그 상태는 아예 시작되지 않았으므로, 여기서
+            # 그냥 끝내야 한다. 그렇지 않으면 아래로 흘러 _pan_end() 가
+            # 불려서 커서가 기본 화살표로 돌아가 버려(스포이드 자체는
+            # 계속 켜져 있는데도) 마치 껐다 켠 것처럼 보이는 문제가 있었다.
+            return
         if self._shape_draft is not None:
             self._finish_shape_draft(e)
             return

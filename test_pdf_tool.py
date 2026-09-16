@@ -2355,6 +2355,27 @@ class TestEyedropper(unittest.TestCase):
         pw.prop_panel._eyedrop_color()   # 같은 버튼을 한 번 더
         self.assertIsNone(pw._eyedropper_target, "스포이드 버튼을 다시 누르면 꺼져야 함")
 
+    def test_cursor_stays_eyedropper_after_a_full_click(self):
+        """스포이드로 색을 한 번 찍은 뒤(press+release), 커서가 기본
+        화살표로 돌아가면 안 된다 — 모드 자체는 계속 켜져 있는데 커서만
+        원래대로 돌아가면 마치 꺼진 것처럼 보여 혼란을 준다. release
+        단계에서 (아무 드래그 상태도 없을 때 실행되는) _pan_end() 가
+        불려서 커서를 초기화해버리던 게 원인이었다."""
+        pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+
+        pw.prop_panel._eyedrop_color()
+        self.assertEqual(pw.canvas.cget("cursor"), "tcross")
+
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        pw._on_canvas_release(FakeEvent(x=300, y=300))
+
+        self.assertIsNotNone(pw._eyedropper_target, "클릭 한 번으로 스포이드 모드가 꺼지면 안 됨")
+        self.assertEqual(pw.canvas.cget("cursor"), "tcross",
+            "클릭 후에도 스포이드 커서가 유지되어야 함")
+
     def test_eyedropper_applies_sampled_color_to_shape_line(self):
         pages = self._make_pages()
         pw = self._open_preview(pages)
