@@ -395,6 +395,37 @@ def _text_needs_cjk_font(text):
     return any(ord(ch) > 0xFF for ch in (text or ""))
 
 
+def _fallback_char_font(ch):
+    """실제 폰트 파일이 없을 때, 이 글자 하나를 그릴 내장 대체 폰트
+    이름을 고른다. "korea"는 한글도 그리지만 라틴 문자/숫자/괄호 같은
+    기호까지도 전부 글자 크기와 같은 폭의 정사각형 칸에 넣어 그려서
+    (실측으로 확인됨), 한글과 그 밖의 문자가 한 줄에 섞여 있을 때
+    줄 전체를 "korea"로 통일해 버리면 괄호 등 원래 좁아야 할 문자
+    주변에 불필요한 빈 틈이 생긴다. 그래서 문자 단위로 한글/CJK
+    (0xFF 초과)면 "korea", 아니면 "helv"를 쓰도록 골라, 같은 줄
+    안에서도 필요한 곳만 "korea"를 쓰게 한다."""
+    return "korea" if ord(ch) > 0xFF else "helv"
+
+
+def _measure_line_fallback(line, size, font_cache=None):
+    """내장 대체 폰트로 그릴 줄 하나의 문자별 (문자, fontname, 폭)과
+    전체 폭을 계산한다. font_cache 를 주면 fontname별 fitz.Font 캐시로
+    쓴다(현재는 폭 측정에 fitz.get_text_length 모듈 함수를 쓰므로
+    Font 객체 자체는 필요 없지만, 호출부가 이미 갖고 있는 캐시를
+    그대로 넘겨도 무해하도록 시그니처만 맞춰 둔다)."""
+    chars = []
+    total = 0.0
+    for ch in line:
+        fn = _fallback_char_font(ch)
+        try:
+            w = fitz.get_text_length(ch, fontname=fn, fontsize=size)
+        except Exception:
+            w = 0.0
+        chars.append((ch, fn, w))
+        total += w
+    return total, chars
+
+
 def _resolve_annot_font(family, bold, italic, alias, needs_cjk=True):
     """(fitz.Font, fontfile 경로 또는 None, insert_text 에 넘길 fontname)
     을 반환한다. 실제 폰트 파일을 못 찾으면 내장 대체 폰트로 넘어가는데,
@@ -445,6 +476,7 @@ def _resolve_and_measure_text(a, font_cache):
     except Exception:
         ascent = size * 0.8
     line_height = size * 1.2
+    fallback_chars = None
     try:
         if fontfile:
             # 실제 폰트 파일을 그대로 삽입/측정 둘 다에 쓰므로 일치한다.
@@ -454,11 +486,21 @@ def _resolve_and_measure_text(a, font_cache):
             # 잰 길이가 insert_text(fontname=...) 가 실제로 그리는 폭과
             # 어긋날 수 있다(서로 다른 내부 리소스로 풀림) — 모듈 레벨
             # get_text_length() 는 insert_text 와 같은 방식으로 풀리므로
-            # 그 쪽을 대신 쓴다.
-            widths = [fitz.get_text_length(ln, fontname=fontname, fontsize=size) for ln in lines]
+            # 그 쪽을 대신 쓴다. 또한 "korea"는 한글 아닌 문자까지도
+            # font_size 폭 정사각형에 그려버리므로, 한글과 라틴/기호가
+            # 섞인 줄에서 줄 전체에 하나의 fontname 만 쓰면 좁아야 할
+            # 문자(괄호 등) 주변에 빈 틈이 생긴다 — 문자 단위로 맞는
+            # 대체 폰트를 골라 재고 그 결과를 fallback_chars 에 담아
+            # _bake_text_annot 이 문자 단위로 그대로 그리게 한다.
+            widths = []
+            fallback_chars = []
+            for ln in lines:
+                total, chars = _measure_line_fallback(ln, size)
+                widths.append(total)
+                fallback_chars.append(chars)
     except Exception:
         widths = [0.0 for _ in lines]
-    return font, fontfile, fontname, size, ascent, line_height, lines, widths
+    return font, fontfile, fontname, size, ascent, line_height, lines, widths, fallback_chars
 
 
 def _bake_text_annot(page, a, raw_w, raw_h, native_rot, font_cache):
@@ -470,7 +512,7 @@ def _bake_text_annot(page, a, raw_w, raw_h, native_rot, font_cache):
     if native_rot:
         x_pt, y_pt = unrotate_point_pt(x_pt, y_pt, raw_w, raw_h, native_rot)
 
-    font, fontfile, fontname, size, ascent, line_height, lines, widths = \
+    font, fontfile, fontname, size, ascent, line_height, lines, widths, fallback_chars = \
         _resolve_and_measure_text(a, font_cache)
     color = _color_hex_to_rgb01(a.get("color", DEFAULT_ANNOT_COLOR))
     align = a.get("align", "left")
@@ -489,15 +531,32 @@ def _bake_text_annot(page, a, raw_w, raw_h, native_rot, font_cache):
         elif align == "right": dx = -w
         else: dx = 0.0
         px, py = x_pt + dx, y_pt + ascent + i * line_height
-        kwargs = dict(fontsize=size, color=color, fontname=fontname)
-        if fontfile:
-            kwargs["fontfile"] = fontfile
-        if mat is not None:
-            kwargs["morph"] = (anchor, mat)
-        try:
-            page.insert_text(fitz.Point(px, py), line, **kwargs)
-        except Exception:
-            pass
+        if fallback_chars is not None:
+            # 실제 폰트 파일이 없는 경우: 줄 전체에 fontname 하나만
+            # 쓰지 않고, 문자마다 알맞은 대체 폰트("korea"/"helv")로
+            # 한 글자씩 삽입한다 — 한글과 라틴/기호가 섞인 줄에서
+            # 괄호 등 좁아야 할 문자 주변에 빈 틈이 생기는 걸 막기
+            # 위함(_measure_line_fallback/_fallback_char_font 참고).
+            cum = 0.0
+            for ch, fn, cw in fallback_chars[i]:
+                kwargs = dict(fontsize=size, color=color, fontname=fn)
+                if mat is not None:
+                    kwargs["morph"] = (anchor, mat)
+                try:
+                    page.insert_text(fitz.Point(px + cum, py), ch, **kwargs)
+                except Exception:
+                    pass
+                cum += cw
+        else:
+            kwargs = dict(fontsize=size, color=color, fontname=fontname)
+            if fontfile:
+                kwargs["fontfile"] = fontfile
+            if mat is not None:
+                kwargs["morph"] = (anchor, mat)
+            try:
+                page.insert_text(fitz.Point(px, py), line, **kwargs)
+            except Exception:
+                pass
 
 
 # ══════════════════════════════════════════════════════════
@@ -2684,7 +2743,12 @@ class PreviewWin(tk.Toplevel):
                     if fontfile:
                         char_widths = [font.text_length(ch, fontsize=size_pt) for ch in line]
                     else:
-                        char_widths = [fitz.get_text_length(ch, fontname=fontname, fontsize=size_pt)
+                        # "korea"/"helv" 대체 폰트는 문자 단위로 골라야
+                        # 한글+라틴/기호가 섞인 줄에서 괄호 등 주변에
+                        # 불필요한 빈 틈이 생기지 않는다(_bake_text_annot
+                        # 의 fallback_chars 와 동일한 기준).
+                        char_widths = [fitz.get_text_length(
+                                           ch, fontname=_fallback_char_font(ch), fontsize=size_pt)
                                        for ch in line]
                     line_w = sum(char_widths)
                 else:

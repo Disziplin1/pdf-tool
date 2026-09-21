@@ -1819,6 +1819,39 @@ class TestExportBakesTextAnnots(unittest.TestCase):
         doc.close()
         self.assertEqual(rotation, 90)
 
+    def test_exported_mixed_korean_and_paren_does_not_widen_parenthesis(self):
+        """실사용 신고 사례: "한국무브넥스( 월드테크)"처럼 한글과 괄호가
+        섞인 텍스트를 내보내면 괄호 앞에 이상한 빈 틈이 생겼다 —
+        korea(한글 지원) 내장 폰트가 괄호 같은 라틴/기호 문자까지도
+        font_size 와 같은 폭의 정사각형 칸에 그리기 때문. 한글이 섞여
+        있어도 괄호/영문/숫자는 문자 단위로 helv 를 써서 원래 폭대로
+        좁게 나와야 한다."""
+        ot, pages = self._make_pages()
+        size = 30.0
+        pages[0]["annots"].append({
+            "id": 9301, "type": "text", "text": "한국(가)",
+            "x": pt.mm_to_pt(20), "y": pt.mm_to_pt(20),
+            "font": pt.DEFAULT_ANNOT_FONT, "font_size": size,
+            "color": "#000000", "bold": False, "italic": False,
+            "align": "left", "rotation": 0.0,
+        })
+        out = os.path.join(self.tmpdir, "out_mixed_paren.pdf")
+        self._export(ot, out)
+
+        doc = fitz.open(out)
+        raw = doc[0].get_text("rawdict")
+        doc.close()
+        chars = [c for block in raw["blocks"] for line in block.get("lines", [])
+                 for span in line["spans"] for c in span["chars"]]
+        by_char = {c["c"]: c["bbox"] for c in chars}
+        hangul_w = by_char["한"][2] - by_char["한"][0]
+        paren_w = by_char["("][2] - by_char["("][0]
+        self.assertAlmostEqual(hangul_w, size, delta=1.0,
+            msg="한글 문자는 지금까지처럼 korea 폰트의 정사각형 칸(font_size 폭)대로 나와야 함")
+        self.assertLess(paren_w, hangul_w * 0.7,
+            "괄호는 helv 기준의 원래 좁은 폭으로 나와야 하고, korea 처럼 "
+            "font_size 폭 정사각형으로 넓게 그려지면 안 됨")
+
 
 # ══════════════════════════════════════════════════════════
 #  7. 도형(사각형/화살표/강조) — 생성/선택/이동/삭제/렌더/내보내기
@@ -2693,6 +2726,26 @@ class TestPreviewTextMatchesExportMeasurement(unittest.TestCase):
             pt._text_needs_cjk_font(text))
         self.assertIsNone(fontfile)
         self.assertEqual(fontname, "korea")
+
+    def test_mixed_korean_and_paren_uses_narrow_width_for_parenthesis(self):
+        """실사용 신고 사례: "한국(가)"처럼 한글과 괄호가 섞이면, 줄
+        전체에 korea 폰트 하나만 쓰지 않고 괄호 문자는 helv 기준의
+        좁은 폭으로 그려야 한다(korea 는 모든 문자를 font_size 폭
+        정사각형에 그려서 괄호 앞뒤에 불필요한 빈 틈이 생겼었음)."""
+        pages = self._make_pages()
+        text = "한국(가)"
+        pw, annot = self._open_preview_with_text(pages, text)
+        annot["font_size"] = 30.0
+        pw._redraw_annots()
+
+        tag = f"annot_{annot['id']}"
+        items = pw.canvas.find_withtag(tag)
+        self.assertEqual(len(items), len(text))
+        widths_px = [pw.canvas.bbox(it)[2] - pw.canvas.bbox(it)[0] for it in items]
+        hangul_w = widths_px[0]   # '한'
+        paren_w = widths_px[2]    # '('
+        self.assertLess(paren_w, hangul_w * 0.7,
+            "괄호는 한글 문자보다 뚜렷이 좁게 그려져야 함")
 
     def test_rotated_text_falls_back_to_single_item_even_with_real_font(self):
         """회전이 있는 텍스트는 실제 폰트 파일을 찾았어도 글자별 측정
