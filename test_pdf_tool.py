@@ -2892,6 +2892,93 @@ class TestImageImportAndExport(unittest.TestCase):
         # 페이지 수만큼 원래 지정한 파일명 자체는 생성되지 않아야 함(각 페이지 파일로 대체)
         self.assertFalse(os.path.exists(out))
 
+    def test_export_pdf_checkbox_off_still_saves_one_combined_file(self):
+        """체크박스를 켜지 않으면(기본값) 지금까지처럼 한 PDF로 묶여
+        저장되어야 한다 — 기존 동작 회귀 방지."""
+        pdf_path = os.path.join(self.tmpdir, "multi_combined.pdf")
+        make_pdf(pdf_path, sizes=((595.28, 841.89), (595.28, 841.89), (595.28, 841.89)))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([pdf_path])
+        self.assertFalse(ot.export_separate_var.get(), "체크박스 기본값은 꺼짐이어야 함")
+
+        out = os.path.join(self.tmpdir, "combined_out.pdf")
+        self._export(ot, out)
+
+        self.assertTrue(os.path.exists(out))
+        doc = fitz.open(out)
+        self.assertEqual(len(doc), 3)
+        doc.close()
+
+    def test_export_pdf_checkbox_on_creates_one_file_per_page(self):
+        """"PDF 페이지별로 각각 저장" 체크박스를 켜면, 이미지 내보내기와
+        같은 파일명 규칙("_p001","_p002"...)으로 페이지마다 별도 PDF
+        파일이 생성되어야 한다."""
+        pdf_path = os.path.join(self.tmpdir, "multi_separate.pdf")
+        make_pdf(pdf_path, sizes=((595.28, 841.89), (420, 300), (595.28, 841.89)))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([pdf_path])
+        ot.export_separate_var.set(True)
+
+        out = os.path.join(self.tmpdir, "separate_out.pdf")
+        self._export(ot, out)
+
+        expected = [
+            os.path.join(self.tmpdir, "separate_out_p001.pdf"),
+            os.path.join(self.tmpdir, "separate_out_p002.pdf"),
+            os.path.join(self.tmpdir, "separate_out_p003.pdf"),
+        ]
+        for p in expected:
+            self.assertTrue(os.path.exists(p), f"{p} 가 생성되어야 함")
+            doc = fitz.open(p)
+            self.assertEqual(len(doc), 1, f"{p} 는 한 페이지짜리 PDF여야 함")
+            doc.close()
+        self.assertFalse(os.path.exists(out),
+            "페이지별로 나눴으면 원래 지정한 파일명 자체는 생성되지 않아야 함")
+
+    def test_export_pdf_checkbox_on_with_single_page_still_saves_normally(self):
+        """페이지가 1장뿐이면 체크박스가 켜져 있어도 굳이 나눌 이유가
+        없으므로 평소처럼 하나의 파일로 저장되어야 한다."""
+        img = self._make_image("single_for_separate.png")
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([img])
+        ot.export_separate_var.set(True)
+
+        out = os.path.join(self.tmpdir, "single_separate_out.pdf")
+        self._export(ot, out)
+
+        self.assertTrue(os.path.exists(out))
+        self.assertFalse(os.path.exists(
+            os.path.join(self.tmpdir, "single_separate_out_p001.pdf")))
+
+    def test_export_pdf_separately_bakes_annots_per_page(self):
+        """페이지별 저장에서도 각 페이지에 추가한 텍스트/도형이 정상적으로
+        구워져 들어가야 한다."""
+        pdf_path = os.path.join(self.tmpdir, "multi_annot.pdf")
+        make_pdf(pdf_path, sizes=((595.28, 841.89), (595.28, 841.89)))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([pdf_path])
+        ot.pages[1]["annots"].append({
+            "id": 7001, "type": "text", "text": "둘째장",
+            "x": pt.mm_to_pt(20), "y": pt.mm_to_pt(30),
+            "font": pt.DEFAULT_ANNOT_FONT, "font_size": 20.0,
+            "color": "#000000", "bold": False, "italic": False,
+            "align": "left", "rotation": 0.0,
+        })
+        ot.export_separate_var.set(True)
+
+        out = os.path.join(self.tmpdir, "annot_separate_out.pdf")
+        self._export(ot, out)
+
+        p2 = os.path.join(self.tmpdir, "annot_separate_out_p002.pdf")
+        doc = fitz.open(p2)
+        text = doc[0].get_text()
+        doc.close()
+        self.assertIn("둘째장", text)
+
     def test_exported_image_reflects_added_text(self):
         """이미지를 불러와 텍스트를 추가한 뒤 jpg로 저장하면, 저장된
         이미지 안에 그 텍스트가 실제로 그려져 있어야 한다 — 픽셀 검사

@@ -2911,6 +2911,11 @@ class OrganizeTab(tk.Frame):
         # ── 내보내기 (오른쪽, 가장 중요한 동작이라 강조) ──
         mkbtn(tb, "▶  내보내기", self._export, bg=ACCENT,
               px=20, py=11).pack(side="right", padx=(4,12))
+        self.export_separate_var = tk.BooleanVar()
+        tk.Checkbutton(tb, variable=self.export_separate_var,
+                       text="페이지별로 저장", bg=TOOLBAR, fg=TEXT,
+                       selectcolor=ACCENT, activebackground=TOOLBAR, font=FONT_S,
+                       bd=0, highlightthickness=0).pack(side="right", padx=(4,4))
         sep_v(tb)
 
         # ── 확대/축소 그룹 (동일 크기 정사각형) ──────────
@@ -3485,6 +3490,14 @@ class OrganizeTab(tk.Frame):
                 else:
                     messagebox.showinfo("완료",
                         f"페이지마다 별도 파일로 {len(saved)}개 저장 완료!\n{os.path.dirname(saved[0])}")
+            elif ext == ".pdf" and self.export_separate_var.get() and len(self.pages) > 1:
+                if not PREVIEW_OK:
+                    messagebox.showerror("오류", "페이지별로 저장하려면 pymupdf(fitz)가 필요합니다.")
+                    return
+                saved = self._export_pdf_pages_separately(out)
+                self._dirty = False
+                messagebox.showinfo("완료",
+                    f"페이지마다 별도 PDF 파일로 {len(saved)}개 저장 완료!\n{os.path.dirname(saved[0])}")
             elif PREVIEW_OK:
                 self._export_with_fitz(out)
                 self._dirty = False
@@ -3573,6 +3586,35 @@ class OrganizeTab(tk.Frame):
             _log_error(f"_export_with_fitz: out_doc.save({os.path.basename(out)})")
             raise RuntimeError(
                 f"PDF 파일로 저장하지 못했습니다.\n자세한 내용: {ERROR_LOG}")
+        finally:
+            out_doc.close()
+
+    def _export_pdf_pages_separately(self, out):
+        """PDF 로 저장하되, 한 파일로 묶지 않고 이미지 내보내기와 같은
+        규칙("_p1","_p2"... 접미사)으로 페이지마다 별도 PDF 파일을
+        만든다. self._export_pdf_pages_separately 는 페이지가 2장
+        이상일 때만 호출되므로(1장이면 굳이 나눌 이유가 없어 평소처럼
+        _export_with_fitz 로 저장) n==1 분기는 두지 않는다."""
+        base_dir  = os.path.dirname(out)
+        base_name = os.path.splitext(os.path.basename(out))[0]
+        out_doc = self._build_baked_doc()
+        try:
+            n = len(out_doc)
+            saved = []
+            for i in range(n):
+                single = fitz.open()
+                try:
+                    single.insert_pdf(out_doc, from_page=i, to_page=i)
+                    path = os.path.join(base_dir, f"{base_name}_p{i+1:03d}.pdf")
+                    single.save(path)
+                    saved.append(path)
+                finally:
+                    single.close()
+            return saved
+        except Exception:
+            _log_error(f"_export_pdf_pages_separately: {os.path.basename(out)}")
+            raise RuntimeError(
+                f"페이지별로 PDF를 저장하지 못했습니다.\n자세한 내용: {ERROR_LOG}")
         finally:
             out_doc.close()
 
