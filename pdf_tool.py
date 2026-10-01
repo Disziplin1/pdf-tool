@@ -990,7 +990,7 @@ class TextPropPanel(tk.Frame):
 
         # ── 삭제 ──────────────────────────────────────────
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x", padx=14, pady=(4,10))
-        tk.Button(self, text="🗑 이 텍스트 삭제", command=self._delete_annot,
+        tk.Button(self, text="이 텍스트 삭제", command=self._delete_annot,
                   bg=DANGER, fg="white", font=FONT, relief="flat",
                   padx=12, pady=7, cursor="hand2", bd=0,
                   activebackground=_shade(DANGER, 0.9)).pack(fill="x", padx=14, pady=(0,14))
@@ -1381,7 +1381,7 @@ class ShapePropPanel(tk.Frame):
         # ── 삭제 ────────────────────────────────────────────
         self._delete_sep = tk.Frame(self, bg=BORDER, height=1)
         self._delete_sep.pack(fill="x", padx=14, pady=(4,10))
-        tk.Button(self, text="🗑 이 도형 삭제", command=self._delete_shape,
+        tk.Button(self, text="이 도형 삭제", command=self._delete_shape,
                   bg=DANGER, fg="white", font=FONT, relief="flat",
                   padx=12, pady=7, cursor="hand2", bd=0,
                   activebackground=_shade(DANGER, 0.9)).pack(fill="x", padx=14, pady=(0,14))
