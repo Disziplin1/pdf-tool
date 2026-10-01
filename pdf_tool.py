@@ -166,6 +166,7 @@ DEFAULT_ANNOT_COLOR = "#000000"
 DEFAULT_ANNOT_TEXT  = "텍스트"  # 새 텍스트 생성 시 기본 내용(바로 선택되어 덮어쓰기 가능)
 TEXT_MIN_FONT_SIZE  = 4.0      # pt — 드래그로 크기조절할 때 이보다 작아지지 않게 막는다
 TEXT_MAX_FONT_SIZE  = 500.0    # pt — 드래그 중 실수로 폭주하지 않게 막는 상한
+DEFAULT_COVER_BG_COLOR = "#FFFFFF"  # 기존 텍스트를 편집할 때 원래 글자를 가리는 배경색 기본값
 
 # 도형(사각형/화살표/강조) annot 기본값
 DEFAULT_SHAPE_LINE_COLOR = "#000000"
@@ -639,11 +640,148 @@ def _bake_all_annots(page, pg, native_rot, font_cache):
     annots = pg.get("annots", [])
     if not annots: return
     raw_w, raw_h = rotated_size_pt(pg.get("page_w_pt") or 0, pg.get("page_h_pt") or 0, native_rot)
+
+    # "기존 텍스트 편집"(covers 가 있는 text annot)은, 가릴 영역을 흰
+    # 사각형으로 덮어 그리기만 하면 화면엔 안 보여도 PDF 안에는 원래
+    # 글자가 그대로 남아있어 검색/복사가 된다 — 진짜로 "고친" 게
+    # 아니라 그 위에 덧그린 것뿐이기 때문. 그래서 새 텍스트를 쓰기 전에
+    # 가릴 영역을 모두 모아 PyMuPDF 레닥션(실제 삭제)부터 한 번에
+    # 끝낸다. 새 텍스트를 먼저 넣고 나중에 레닥션하면, 레닥션이
+    # 해당 영역의 "현재" 콘텐츠를 지우므로 방금 넣은 새 텍스트까지
+    # 같이 지워져 버린다 — 반드시 레닥션이 먼저여야 한다.
+    had_redaction = False
+    for a in annots:
+        if a.get("type") == "text" and a.get("covers"):
+            cx0, cy0, cx1, cy1 = a["covers"]
+            if native_rot:
+                cx0, cy0 = unrotate_point_pt(cx0, cy0, raw_w, raw_h, native_rot)
+                cx1, cy1 = unrotate_point_pt(cx1, cy1, raw_w, raw_h, native_rot)
+            rect = fitz.Rect(min(cx0, cx1), min(cy0, cy1), max(cx0, cx1), max(cy0, cy1))
+            bg = _color_hex_to_rgb01(a.get("bg_color", DEFAULT_COVER_BG_COLOR))
+            try:
+                page.add_redact_annot(rect, fill=bg)
+                had_redaction = True
+            except Exception:
+                pass
+    if had_redaction:
+        try:
+            page.apply_redactions()
+        except Exception:
+            pass
+
     for a in annots:
         if a.get("type") == "text":
             _bake_text_annot(page, a, raw_w, raw_h, native_rot, font_cache)
         elif a.get("type") in ("rect", "arrow", "highlight"):
             _bake_shape_annot(page, a, raw_w, raw_h, native_rot)
+
+
+# ══════════════════════════════════════════════════════════
+#  "기존 텍스트 편집" — 이미 PDF 콘텐츠로 박혀 있는 글자를 클릭해서
+#  고칠 수 있게, 글자 span 단위로 추출한다. 클릭하면 그 자리의 글자를
+#  그대로 담은 새 text annot 을 만들고(covers 필드에 원래 글자 영역을
+#  함께 저장), 내보낼 때 그 영역을 레닥션으로 실제로 지운 뒤 그 위에
+#  새 텍스트를 쓴다(_bake_all_annots 참고) — 단순히 덮어 그리기만 하는
+#  게 아니라 진짜로 "고쳐지게" 하기 위함이다.
+# ══════════════════════════════════════════════════════════
+def _match_installed_font(raw_name):
+    """PDF 에 박혀 있는 폰트 이름(예: "ABCDEF+Calibri-Bold" 같은 서브셋
+    접두사/굵기 접미사가 붙은 이름)을, 지금 시스템에 설치된 폰트
+    패밀리 이름과 최대한 맞춰본다. 완벽한 폰트 매칭은 범위 밖이라, 못
+    찾으면 기본 폰트로 대체한다."""
+    if not raw_name:
+        return DEFAULT_ANNOT_FONT
+    name = raw_name.split("+", 1)[-1]   # 서브셋 접두사(ABCDEF+) 제거
+    for suffix in ("-BoldItalic", "-BoldOblique", "-Bold", "-Italic", "-Oblique",
+                   "-Regular", ",BoldItalic", ",Bold", ",Italic", ",Regular"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    try:
+        from tkinter import font as tkfont
+        installed = tkfont.families()
+    except Exception:
+        installed = []
+    name_low = name.strip().lower()
+    for fam in installed:
+        if fam.lower() == name_low:
+            return fam
+    for fam in installed:
+        fam_low = fam.lower()
+        if name_low and (name_low in fam_low or fam_low in name_low):
+            return fam
+    return DEFAULT_ANNOT_FONT
+
+
+def _extract_existing_text_spans(pg):
+    """pg 가 가리키는 원본 PDF 페이지에서 이미 콘텐츠로 박혀 있는
+    텍스트를 글자 span(같은 글꼴/크기로 이어지는 한 덩어리) 단위로
+    추출해, annot 의 x/y 와 같은 내부 좌표계(페이지 자체 회전을 반영한
+    "원본" 좌표계, pg["rot"] 적용 전)로 변환해 돌려준다. 각 항목은
+    그대로 새 text annot 을 만드는 데 쓸 수 있는 필드(x,y,size,color,
+    bold,italic,font,covers)를 담는다."""
+    if not PREVIEW_OK or pg.get("src_image_ext"):
+        return []
+    out = []
+    doc = None
+    try:
+        doc = fitz.open(pg["src"])
+        pidx = pg["pidx"]
+        if pidx >= len(doc):
+            return []
+        page = doc[pidx]
+        native_rot = page.rotation
+        page_w_pt = pg.get("page_w_pt") or page.rect.width
+        page_h_pt = pg.get("page_h_pt") or page.rect.height
+        raw_w, raw_h = rotated_size_pt(page_w_pt, page_h_pt, native_rot)
+        d = page.get_text("dict")
+        for block in d.get("blocks", []):
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    text = span.get("text", "")
+                    if not text.strip():
+                        continue
+                    ox, oy = span.get("origin", (0.0, 0.0))
+                    bx0, by0, bx1, by1 = span.get("bbox", (ox, oy, ox, oy))
+                    size = span.get("size") or DEFAULT_ANNOT_SIZE
+                    flags = span.get("flags", 0) or 0
+                    bold = bool(flags & (1 << 4))
+                    italic = bool(flags & (1 << 1))
+                    family = _match_installed_font(span.get("font", ""))
+                    needs_cjk = _text_needs_cjk_font(text)
+                    try:
+                        font_obj, _, _ = _resolve_annot_font(
+                            family, bold, italic, alias="EX", needs_cjk=needs_cjk)
+                        ascent = size * (font_obj.ascender or 0.8)
+                    except Exception:
+                        ascent = size * 0.8
+                    # 삽입 기준점(베이스라인)에서 ascent 만큼 위로 올려
+                    # "글자 상자 윗변"을 구한다 — 우리 text annot 의
+                    # x,y 가 저장하는 바로 그 기준점과 같은 의미
+                    # (_bake_text_annot 의 ascent 적용 방식 참고).
+                    top_x, top_y = ox, oy - ascent
+                    corners = [(bx0, by0), (bx1, by0), (bx0, by1), (bx1, by1)]
+                    conv = [rotate_point_pt(cx, cy, raw_w, raw_h, native_rot) for cx, cy in corners]
+                    xs = [c[0] for c in conv]
+                    ys = [c[1] for c in conv]
+                    rx, ry = rotate_point_pt(top_x, top_y, raw_w, raw_h, native_rot)
+                    color_int = span.get("color", 0) or 0
+                    color_hex = "#%06X" % (color_int & 0xFFFFFF)
+                    out.append({
+                        "text": text,
+                        "x": rx, "y": ry,
+                        "font_size": size,
+                        "bold": bold, "italic": italic,
+                        "color": color_hex,
+                        "font": family,
+                        "covers": (min(xs), min(ys), max(xs), max(ys)),
+                    })
+    except Exception:
+        return []
+    finally:
+        if doc is not None:
+            doc.close()
+    return out
 
 
 def make_thumb_for_page(pg, tw, th, factor=2.5):
@@ -703,7 +841,15 @@ class TextPropPanel(tk.Frame):
         # ── 내용 ──────────────────────────────────────────
         tk.Label(self, text="내용", font=FONT_S, bg=PANEL, fg=TEXT_DIM).pack(anchor="w", **pad)
         self.text_var = tk.StringVar()
-        self.content_entry = tk.Entry(self, textvariable=self.text_var, font=FONT, bg="white", fg=TEXT)
+        # 클래식 tk.Entry 는 Windows 에서 한글(특히 IME 조합 중)을 입력/
+        # 수정할 때 이전 글자를 다 지우지 않고 다시 그려서 글자가 겹쳐
+        # 보이는 경우가 있었다 — ttk.Entry 는 OS 네이티브 테마 엔진으로
+        # 그려서 IME 조합 영역 갱신을 제대로 처리하므로 이 문제가 없다.
+        style = ttk.Style(self)
+        style.configure("Content.TEntry", fieldbackground="white",
+                         foreground=TEXT, font=FONT)
+        self.content_entry = ttk.Entry(self, textvariable=self.text_var,
+                                        style="Content.TEntry")
         self.content_entry.pack(fill="x", padx=14, pady=(2,8))
         self.content_entry.bind("<Return>", lambda e: self._apply_text())
         self.content_entry.bind("<FocusOut>", lambda e: self._apply_text())
@@ -787,8 +933,33 @@ class TextPropPanel(tk.Frame):
                                             cursor="hand2", command=self._eyedrop_color)
         self.color_eyedrop_btn.pack(side="left", padx=(4,0))
 
+        # ── 배경색(기존 텍스트를 편집할 때만) ─────────────
+        # "기존텍스트 수정" 도구로 만든 annot 에만 있는 필드(covers) —
+        # 원래 글자를 가릴 사각형의 색이다. 기본은 흰색이지만 페이지
+        # 배경이 흰색이 아니면(색지, 서식지 등) 스포이드로 주변 색을
+        # 찍어 맞출 수 있게 했다. 일반 새 텍스트에는 이 필드가 아예
+        # 없으므로(covers 없음) show_annot() 에서 이 줄 자체를 숨긴다.
+        self.cover_bg_row = tk.Frame(self, bg=PANEL)
+        tk.Label(self.cover_bg_row, text="배경색(기존 글자 가리기)", font=FONT_S,
+                 bg=PANEL, fg=TEXT_DIM).pack(side="left")
+        cover_bg_chip = tk.Frame(self.cover_bg_row, bg=TOOLBAR, padx=3, pady=3)
+        cover_bg_chip.pack(side="left", padx=8)
+        self.cover_bg_btn = tk.Button(cover_bg_chip, text="   ", bg=DEFAULT_COVER_BG_COLOR, width=4,
+                                       relief="flat", bd=0, cursor="hand2",
+                                       command=self._pick_cover_bg_color)
+        self.cover_bg_btn.pack()
+        self.cover_bg_eyedrop_btn = tk.Button(self.cover_bg_row, text="💧", font=FONT_S, width=2,
+                                               bg=TOOLBAR, fg=TEXT, relief="flat", bd=0,
+                                               cursor="hand2", command=self._eyedrop_cover_bg_color)
+        self.cover_bg_eyedrop_btn.pack(side="left", padx=(4,0))
+        # covers 있는 annot 을 선택했을 때만 show_annot() 이 다시 보여준다.
+        # 그냥 pack_forget() 했다가 나중에 pack() 만 다시 부르면 그 시점에
+        # 이미 packing 된 위젯들 맨 뒤(삭제 버튼 아래)로 밀려버리므로,
+        # show_annot() 에서는 반드시 before=self.birow 를 함께 줘서 항상
+        # 색상 줄 바로 다음(굵게/기울임 줄 바로 앞) 자리에 끼워 넣는다.
+
         # ── 굵게 / 기울임 ─────────────────────────────────
-        birow = tk.Frame(self, bg=PANEL); birow.pack(fill="x", padx=10, pady=(0,8))
+        self.birow = birow = tk.Frame(self, bg=PANEL); birow.pack(fill="x", padx=10, pady=(0,8))
         self.bold_var = tk.BooleanVar()
         self.italic_var = tk.BooleanVar()
         tk.Checkbutton(birow, text="굵게", variable=self.bold_var, command=self._apply_style,
@@ -903,6 +1074,11 @@ class TextPropPanel(tk.Frame):
         color = annot.get("color", DEFAULT_ANNOT_COLOR)
         try: self.color_btn.config(bg=color)
         except Exception: pass
+        if annot.get("covers"):
+            self.cover_bg_btn.config(bg=annot.get("bg_color", DEFAULT_COVER_BG_COLOR))
+            self.cover_bg_row.pack(fill="x", padx=14, pady=(0,8), before=self.birow)
+        else:
+            self.cover_bg_row.pack_forget()
         if page_w_pt and page_h_pt:
             self.page_size_lbl.config(
                 text=f"페이지 크기: {pt_to_mm(page_w_pt):.2f} × {pt_to_mm(page_h_pt):.2f} mm")
@@ -1073,6 +1249,33 @@ class TextPropPanel(tk.Frame):
         self.owner._push_undo()
         self.annot["color"] = hexcol
         self.color_btn.config(bg=hexcol)
+        self.owner._on_annot_prop_changed()
+
+    def _pick_cover_bg_color(self):
+        if self.annot is None: return
+        from tkinter import colorchooser
+        cur = self.annot.get("bg_color", DEFAULT_COVER_BG_COLOR)
+        _, hexcol = colorchooser.askcolor(color=cur, parent=self, title="배경색 선택")
+        if hexcol and hexcol != cur:
+            self.owner._push_undo()
+            self.annot["bg_color"] = hexcol
+            self.cover_bg_btn.config(bg=hexcol)
+            self.owner._on_annot_prop_changed()
+
+    def _eyedrop_cover_bg_color(self):
+        """스포이드 모드로 전환해, 캔버스를 클릭하면 그 지점의 색을
+        그대로 배경색(기존 글자를 가릴 사각형 색)에 적용한다 — 페이지가
+        흰색이 아닌 색지/서식지일 때 주변 색과 맞출 수 있게 한다."""
+        if self.annot is None: return
+        self.owner._toggle_eyedropper(self._apply_eyedropped_cover_bg_color)
+
+    def _apply_eyedropped_cover_bg_color(self, hexcol):
+        if self.annot is None: return
+        cur = self.annot.get("bg_color", DEFAULT_COVER_BG_COLOR)
+        if hexcol == cur: return
+        self.owner._push_undo()
+        self.annot["bg_color"] = hexcol
+        self.cover_bg_btn.config(bg=hexcol)
         self.owner._on_annot_prop_changed()
 
 
@@ -1593,6 +1796,11 @@ class PreviewWin(tk.Toplevel):
         # 똑같은 폰트 탐색(_resolve_annot_font, Windows 레지스트리 조회
         # 포함)을 매번 새로 하면 느리므로 창이 떠 있는 동안 재사용한다.
         self._preview_font_cache = {}
+        # "기존 텍스트 편집" 도구가 클릭 히트테스트에 쓸, 페이지별 기존
+        # 텍스트 span 목록 캐시 — (src, pidx) 당 한 번만 PDF 콘텐츠를
+        # 읽으면 된다(우리가 추가하는 annot 은 원본 콘텐츠 스트림 자체를
+        # 바꾸지 않으므로 세션 내내 값이 바뀌지 않는다).
+        self._existing_text_cache = {}
         # ── 이동(팬) 도구 — 버튼 토글 또는 스페이스바로 임시 활성화 ──
         self._pan_active     = False # 팬 도구가 (버튼/스페이스 무엇으로든) 켜져 있는지
         self._tool_before_pan = "select"  # 팬을 끌 때 되돌아갈 이전 도구
@@ -1708,6 +1916,7 @@ class PreviewWin(tk.Toplevel):
         self.edit_toolbar = tk.Frame(self, bg=TOOLBAR)
         self.tool_btns = {}
         for key, label in [("select","🖱 선택"), ("text","T 텍스트"),
+                           ("edit_existing","✏ 글자수정"),
                            ("rect","▭ 사각형"), ("arrow","↗ 화살표"), ("highlight","🖊 강조"),
                            ("pan","✋ 이동")]:
             # "이동" 은 다른 도구처럼 클릭 시 즉시 전환되는 게 아니라, 다시
@@ -1922,6 +2131,15 @@ class PreviewWin(tk.Toplevel):
             self.selected_id = None
             self._move_state = None
             self.prop_panel.pack_forget()
+            self.shape_panel.pack_forget()
+            # 속성 패널의 입력창(예: 텍스트 "내용")에 포커스가 남아있으면,
+            # 패널 자체는 안 보여도 Tk 상의 키보드 포커스는 그 입력창에
+            # 그대로 남아 있다 — 이 상태로 다른 곳에서 복사한 텍스트를
+            # Ctrl+V 하면, 지금 보고 있는 새 페이지가 아니라 방금 떠나온
+            # 이전 페이지의 그 입력창(과 그 annot 의 내용)에 붙여넣기가
+            # 되어버리는 문제가 있었다. 페이지를 넘길 때는 항상 포커스를
+            # 캔버스로 되돌려 이런 "안 보이는 곳에 붙여넣기"를 막는다.
+            self.canvas.focus_set()
             self._show()
 
     def _zoom(self, factor):
@@ -1985,6 +2203,9 @@ class PreviewWin(tk.Toplevel):
             return
         if self.edit_mode and self.tool == "text":
             self._create_text_at(e.x, e.y)
+            return
+        if self.edit_mode and self.tool == "edit_existing":
+            self._edit_existing_text_at(e.x, e.y)
             return
         if self.edit_mode and self.tool in ("rect", "arrow", "highlight"):
             self._shape_draft = {"tool": self.tool, "sx0": e.x, "sy0": e.y, "item": None}
@@ -2193,6 +2414,8 @@ class PreviewWin(tk.Toplevel):
                      fg="white" if active else TEXT_DIM)
         if key == "text":
             cursor = "xterm"
+        elif key == "edit_existing":
+            cursor = "hand2"
         elif key in ("rect", "arrow", "highlight"):
             cursor = "crosshair"
         elif key == "pan":
@@ -2572,6 +2795,59 @@ class PreviewWin(tk.Toplevel):
         # 이어지는 클릭은 (재)선택/이동/빈 곳 클릭으로 동작하게 한다.
         self._set_tool("select")
 
+    def _get_existing_text_spans(self):
+        pg = self.pages[self.idx]
+        key = (pg["src"], pg["pidx"])
+        if key not in self._existing_text_cache:
+            self._existing_text_cache[key] = _extract_existing_text_spans(pg)
+        return self._existing_text_cache[key]
+
+    def _find_existing_text_span_at(self, px, py):
+        """내부 좌표(px,py) 를 포함하는 기존 텍스트 span 중 가장 작은
+        (=가장 정확히 겨눈) 것을 돌려준다. 여러 줄이 겹쳐 보일 때도
+        면적이 작은 쪽을 우선해 엉뚱한 줄이 아니라 클릭한 글자에 가장
+        가까운 span 이 선택되게 한다."""
+        best, best_area = None, None
+        for s in self._get_existing_text_spans():
+            x0, y0, x1, y1 = s["covers"]
+            if x0 <= px <= x1 and y0 <= py <= y1:
+                area = (x1 - x0) * (y1 - y0)
+                if best is None or area < best_area:
+                    best, best_area = s, area
+        return best
+
+    def _edit_existing_text_at(self, ex, ey):
+        """"기존텍스트 수정" 도구로 캔버스를 클릭했을 때 호출된다. 클릭한
+        자리에 이미 PDF 콘텐츠로 박혀 있는 글자(span)가 있으면, 그
+        텍스트/위치/크기/색상/굵게·기울임을 그대로 옮겨 담은 새 text
+        annot 을 만들어 바로 편집할 수 있게 한다. covers 필드에 원래
+        글자가 차지하던 영역을 함께 저장해두면, 내보낼 때 그 영역을
+        실제로 지우고(레닥션) 그 자리에 새 텍스트를 써서 진짜로 "고친"
+        것처럼 만든다(_bake_all_annots 참고) — 클릭한 자리에 기존
+        글자가 없으면 아무 일도 하지 않는다(선택 해제만)."""
+        if self._sc is None: return
+        px_pdf, py_pdf = screen_to_pdf(ex, ey, self._cur_pw, self._cur_ph,
+                                        self._cur_rot, self._sc, self._cx, self._cy)
+        span = self._find_existing_text_span_at(px_pdf, py_pdf)
+        if span is None:
+            self._select_annot(None)
+            return
+        pg = self.pages[self.idx]
+        annot = {
+            "id": next(_id_gen), "type": "text", "text": span["text"],
+            "x": span["x"], "y": span["y"],
+            "font": span["font"], "font_size": span["font_size"],
+            "color": span["color"], "bold": span["bold"], "italic": span["italic"],
+            "align": "left", "rotation": 0.0,
+            "covers": span["covers"], "bg_color": DEFAULT_COVER_BG_COLOR,
+        }
+        self._push_undo()
+        pg.setdefault("annots", []).append(annot)
+        self._select_annot(annot["id"])
+        self.prop_panel.focus_content_for_edit()
+        if self.on_change: self.on_change()
+        self._set_tool("select")
+
     def _drag_annot(self, e):
         if self._sc is None or self._move_state is None: return
         a = self._find_annot(self._move_state["annot_id"])
@@ -2646,9 +2922,31 @@ class PreviewWin(tk.Toplevel):
                 family, bold, italic, alias=f"P{len(self._preview_font_cache)}", needs_cjk=needs_cjk)
         return self._preview_font_cache[key]
 
+    def _covers_screen_rect(self, a):
+        """"기존 텍스트 편집"으로 만든 annot 이 가릴(흰 사각형으로
+        덮을) 원래 글자 영역을 화면 좌표로 변환한다. _shape_screen_corners
+        와 같은 이유로 두 꼭짓점만 각각 변환해도 충분하다(pdf_to_screen
+        이 이미 페이지 회전까지 반영해 각 점을 올바르게 옮겨주므로)."""
+        x0, y0, x1, y1 = a["covers"]
+        sx0, sy0 = pdf_to_screen(x0, y0, self._cur_pw, self._cur_ph,
+                                  self._cur_rot, self._sc, self._cx, self._cy)
+        sx1, sy1 = pdf_to_screen(x1, y1, self._cur_pw, self._cur_ph,
+                                  self._cur_rot, self._sc, self._cx, self._cy)
+        return min(sx0, sx1), min(sy0, sy1), max(sx0, sx1), max(sy0, sy1)
+
     def _draw_text_annot(self, a):
         px, py = pdf_to_screen(a["x"], a["y"], self._cur_pw, self._cur_ph,
                                 self._cur_rot, self._sc, self._cx, self._cy)
+        tag = f"annot_{a['id']}"
+        if a.get("covers"):
+            # 실제 내보내기(레닥션)와 똑같이, 원래 글자가 있던 자리를
+            # 먼저 배경색 사각형으로 가린 뒤 그 위에 새 텍스트를 그려서
+            # 편집 화면에서도 "고쳐진" 모습 그대로 보이게 한다.
+            sx0, sy0, sx1, sy1 = self._covers_screen_rect(a)
+            self.canvas.create_rectangle(
+                sx0, sy0, sx1, sy1,
+                fill=a.get("bg_color", DEFAULT_COVER_BG_COLOR), outline="",
+                tags=(tag, "annot"))
         family = a.get("font", DEFAULT_ANNOT_FONT)
         bold, italic = bool(a.get("bold")), bool(a.get("italic"))
         # 실제 폰트 파일을 못 찾아 "korea"/"helv" 내장 폰트로 대체될 때는
@@ -2687,7 +2985,6 @@ class PreviewWin(tk.Toplevel):
         # 기준으로 잡히고, justify 가 그 안에서 각 줄을 맞추기 때문에
         # 결과적으로 모든 줄이 X 기준선에 정렬됨).
         anchor = {"left": "nw", "center": "n", "right": "ne"}.get(align, "nw")
-        tag = f"annot_{a['id']}"
 
         # 회전이 없을 때는 Tk 의 자체 텍스트 레이아웃에 통째로 맡기지
         # 않고, 내보내기 때(_bake_text_annot) 쓰는 것과 똑같은 PyMuPDF

@@ -1494,6 +1494,39 @@ class TestUsabilityImprovements(unittest.TestCase):
             pw._on_key_right()
         mock_go.assert_called_once_with(1)
 
+    def test_going_to_next_page_releases_focus_from_content_entry(self):
+        """실사용 신고 사례: 텍스트 "내용" 입력창에 포커스가 남아있는
+        채로 다음 페이지로 넘어가면, 패널 자체는 안 보여도 Tk 포커스는
+        그 입력창에 그대로 남아 있었다 — 그 상태로 다른 곳에서 복사한
+        텍스트를 Ctrl+V 하면 지금 보는 새 페이지가 아니라 방금 떠나온
+        페이지의 그 입력창(annot 내용)에 붙여넣기가 되는 문제가 있었다.
+        페이지를 넘기면 포커스가 캔버스로 돌아와야 한다(헤드리스 테스트
+        환경은 창 매니저가 없어 실제 OS 포커스 이동을 못 받으므로,
+        selecting_annot_on_canvas 테스트와 동일하게 canvas.focus_set()
+        호출 여부로 확인한다)."""
+        multi_pdf = os.path.join(self.tmpdir, "multi_nav.pdf")
+        make_pdf(multi_pdf, sizes=((595.28, 841.89), (595.28, 841.89)))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([multi_pdf])
+        pages = ot.pages
+
+        pw, annot = self._open_preview_with_text(pages)
+        with patch.object(pw.canvas, "focus_set") as mock_focus_set:
+            pw._go(1)
+        mock_focus_set.assert_called()
+
+    def test_content_entry_is_ttk_for_proper_hangul_ime_rendering(self):
+        """실사용 신고 사례: 텍스트 "내용" 입력창(클래식 tk.Entry)에서
+        한글을 수정할 때 글자가 겹쳐 보이는 현상이 있었다 — Windows 에서
+        클래식 tk.Entry 는 IME 조합 영역을 다시 그릴 때 이전 글자를
+        완전히 지우지 못하는 경우가 있는 반면, ttk.Entry 는 OS 네이티브
+        테마 엔진으로 그려서 이 문제가 없다. ttk.Entry 로 바뀌었는지
+        확인한다."""
+        pages = self._make_pages()
+        pw, annot = self._open_preview_with_text(pages)
+        self.assertIsInstance(pw.prop_panel.content_entry, pt.ttk.Entry)
+
     # ── 창 컨트롤(□/✕)이 네이티브 타이틀바처럼 서로 붙어있고,
     #     닫기 버튼에 마우스를 올리면 빨간색으로 강조되어야 함 ──────
     def test_window_control_buttons_touch_with_no_gap(self):
@@ -4470,6 +4503,152 @@ class TestUndoRedoGUISmoke(unittest.TestCase):
         pw._redo()
         r = ot.pages[0]["annots"][1]
         self.assertEqual((r["x0"], r["y0"], r["x1"], r["y1"]), rect_moved)
+
+
+# ══════════════════════════════════════════════════════════
+#  "기존 텍스트 편집" — 이미 PDF 콘텐츠에 박혀 있는 글자를 클릭해서
+#  수정하는 기능 (실사용 신고: 내보낸 PDF를 다시 열어 텍스트를 고치려고
+#  하면 아무것도 안 되던 문제)
+# ══════════════════════════════════════════════════════════
+class TestEditExistingText(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = pt.TkinterDnD.Tk() if pt.DND_OK else pt.tk.Tk()
+        cls.root.withdraw()
+        cls.tmpdir = tempfile.mkdtemp(prefix="pdftool_edit_existing_test_")
+        cls.pdf_path = os.path.join(cls.tmpdir, "existing.pdf")
+        doc = fitz.open()
+        page = doc.new_page(width=595.28, height=841.89)
+        page.insert_text(fitz.Point(50, 100), "OriginalText", fontsize=20, fontname="helv")
+        doc.save(cls.pdf_path)
+        doc.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _make_pages(self):
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([self.pdf_path])
+        return ot, ot.pages
+
+    def _open_preview(self, pages):
+        pw = pt.PreviewWin(self.root, pages, 0)
+        pw.update_idletasks(); pw.geometry("1150x820+0+0"); pw.update(); pw._show()
+        self.addCleanup(pw.destroy)
+        pw._toggle_edit()
+        return pw
+
+    def test_extract_existing_text_spans_finds_text_with_covers_bbox(self):
+        """추출 결과가 텍스트/크기/색상과, 가릴 영역(covers)을 담고
+        있어야 한다 — covers 는 실측한 글자 bbox 와 거의 같아야 함."""
+        ot, pages = self._make_pages()
+        spans = pt._extract_existing_text_spans(pages[0])
+        self.assertEqual(len(spans), 1)
+        s = spans[0]
+        self.assertEqual(s["text"], "OriginalText")
+        self.assertEqual(s["font_size"], 20.0)
+        self.assertEqual(s["color"], "#000000")
+        self.assertFalse(s["bold"]); self.assertFalse(s["italic"])
+        x0, y0, x1, y1 = s["covers"]
+        self.assertAlmostEqual(x0, 50.0, delta=1.0)
+        self.assertGreater(x1, x0)
+        self.assertGreater(y1, y0)
+
+    def test_clicking_existing_text_adopts_it_as_editable_text_annot(self):
+        """"글자수정" 도구로 기존 텍스트를 클릭하면, 그 내용을 그대로
+        담은 새 text annot 이 생기고 바로 선택되어야 한다."""
+        ot, pages = self._make_pages()
+        pw = self._open_preview(pages)
+        span = pt._extract_existing_text_spans(pages[0])[0]
+        cx = (span["covers"][0] + span["covers"][2]) / 2
+        cy = (span["covers"][1] + span["covers"][3]) / 2
+        sx, sy = pt.pdf_to_screen(cx, cy, pw._cur_pw, pw._cur_ph, pw._cur_rot,
+                                   pw._sc, pw._cx, pw._cy)
+        pw._set_tool("edit_existing")
+        pw._on_canvas_press(FakeEvent(x=sx, y=sy))
+
+        annots = pages[0]["annots"]
+        self.assertEqual(len(annots), 1)
+        annot = annots[0]
+        self.assertEqual(annot["type"], "text")
+        self.assertEqual(annot["text"], "OriginalText")
+        self.assertEqual(annot.get("covers"), span["covers"])
+        self.assertEqual(annot.get("bg_color"), pt.DEFAULT_COVER_BG_COLOR)
+        self.assertEqual(pw.selected_id, annot["id"])
+        # 계속 클릭해도 새 텍스트가 자꾸 생기지 않도록 선택 도구로
+        # 자동 전환되어야 한다 (_create_text_at 과 동일한 관례).
+        self.assertEqual(pw.tool, "select")
+
+    def test_clicking_empty_area_with_edit_existing_tool_creates_nothing(self):
+        ot, pages = self._make_pages()
+        pw = self._open_preview(pages)
+        pw._set_tool("edit_existing")
+        pw._on_canvas_press(FakeEvent(x=20, y=20))
+        self.assertEqual(pages[0]["annots"], [])
+
+    def test_exported_edited_existing_text_truly_replaces_original(self):
+        """실사용 신고 핵심 시나리오: 기존 텍스트를 "글자수정" 도구로
+        고쳐서 내보내면, 단순히 위에 덧그리는 게 아니라 원래 글자가
+        실제로 지워지고(레닥션) 새 글자만 검색/추출되어야 한다."""
+        ot, pages = self._make_pages()
+        pw = self._open_preview(pages)
+        span = pt._extract_existing_text_spans(pages[0])[0]
+        cx = (span["covers"][0] + span["covers"][2]) / 2
+        cy = (span["covers"][1] + span["covers"][3]) / 2
+        sx, sy = pt.pdf_to_screen(cx, cy, pw._cur_pw, pw._cur_ph, pw._cur_rot,
+                                   pw._sc, pw._cx, pw._cy)
+        pw._set_tool("edit_existing")
+        pw._on_canvas_press(FakeEvent(x=sx, y=sy))
+        annot = pages[0]["annots"][0]
+        annot["text"] = "ReplacedText"
+        pw._redraw_annots()
+
+        out = os.path.join(self.tmpdir, "out_replaced.pdf")
+        with patch.object(pt.filedialog, "asksaveasfilename", return_value=out), \
+             patch.object(pt.messagebox, "showinfo"), \
+             patch.object(pt.messagebox, "showwarning"), \
+             patch.object(pt.messagebox, "showerror") as mock_err:
+            ot._export()
+        self.assertFalse(mock_err.called, f"내보내기 중 오류: {mock_err.call_args}")
+
+        doc = fitz.open(out)
+        text = doc[0].get_text()
+        old_hits = doc[0].search_for("OriginalText")
+        new_hits = doc[0].search_for("ReplacedText")
+        doc.close()
+        self.assertNotIn("OriginalText", text)
+        self.assertEqual(old_hits, [], "원래 글자는 레닥션으로 실제 삭제되어야 함")
+        self.assertTrue(new_hits, "새 글자는 실제로 검색/추출 가능해야 함")
+
+    def test_cover_bg_row_only_shown_for_adopted_existing_text(self):
+        """일반적으로 새로 만든 텍스트에는 "배경색(기존 글자 가리기)"
+        줄이 보이면 안 되고, 기존 텍스트를 고친 annot 을 선택했을 때만
+        보여야 한다."""
+        ot, pages = self._make_pages()
+        pw = self._open_preview(pages)
+
+        pw._set_tool("text")
+        pw._on_canvas_press(FakeEvent(x=300, y=300))
+        with self.assertRaises(pt.tk.TclError):
+            pw.prop_panel.cover_bg_row.pack_info()
+
+        span = pt._extract_existing_text_spans(pages[0])[0]
+        cx = (span["covers"][0] + span["covers"][2]) / 2
+        cy = (span["covers"][1] + span["covers"][3]) / 2
+        sx, sy = pt.pdf_to_screen(cx, cy, pw._cur_pw, pw._cur_ph, pw._cur_rot,
+                                   pw._sc, pw._cx, pw._cy)
+        pw._set_tool("edit_existing")
+        pw._on_canvas_press(FakeEvent(x=sx, y=sy))
+        self.assertEqual(pw.prop_panel.cover_bg_row.pack_info().get("fill"), "x")
+
+    def test_match_installed_font_falls_back_to_default_for_unknown_name(self):
+        self.assertEqual(pt._match_installed_font("ABCDEF+SomeWeirdFontNoOneHas-Bold"),
+                          pt.DEFAULT_ANNOT_FONT)
+        self.assertEqual(pt._match_installed_font(""), pt.DEFAULT_ANNOT_FONT)
+        self.assertEqual(pt._match_installed_font(None), pt.DEFAULT_ANNOT_FONT)
 
 
 if __name__ == "__main__":
