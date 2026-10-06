@@ -2942,11 +2942,27 @@ class PreviewWin(tk.Toplevel):
             # 실제 내보내기(레닥션)와 똑같이, 원래 글자가 있던 자리를
             # 먼저 배경색 사각형으로 가린 뒤 그 위에 새 텍스트를 그려서
             # 편집 화면에서도 "고쳐진" 모습 그대로 보이게 한다.
+            #
+            # 이 가리개 사각형은 "원래 글자가 있던 자리"에 그대로 고정돼
+            # 있어야 하고(covers 는 move 해도 바뀌지 않음 — 원본을 가린
+            # 자리와, 새로 쓸 텍스트의 위치는 서로 다른 개념), 반대로 새
+            # 텍스트는 사용자가 원하는 곳으로 자유롭게 옮길 수 있다. 그런데
+            # 이 둘이 텍스트 본체와 같은 태그(tag = annot_<id>)를 쓰면,
+            # 선택 테두리/크기조절 핸들이 canvas.bbox(tag) 로 "본체 + 가리개"
+            # 전체를 하나로 합쳐 계산해버려서, 텍스트를 가리개에서 멀리
+            # 옮긴 뒤에는 그 사이 전체를 감싸는 거대하고 엉뚱한 선택
+            # 테두리가 나오는 문제가 있었다(실사용 신고: 글자 수정 후 위치를
+            # 옮기니 선택 사각형이 깨져 보임). 가리개는 선택/핸들 계산에서
+            # 쓰는 "annot_<id>" 태그 대신 별도 태그를 써서 그 계산에서
+            # 제외하되, 클릭 시 같은 annot 으로 인식되도록(_hit_test 가
+            # "annot_" 로 시작하고 그다음 토큰이 id인 태그를 찾음) "annot_"
+            # 접두사는 유지하고, 일괄 삭제(_redraw_annots)를 위해 "annot"
+            # 태그도 그대로 함께 붙인다.
             sx0, sy0, sx1, sy1 = self._covers_screen_rect(a)
             self.canvas.create_rectangle(
                 sx0, sy0, sx1, sy1,
                 fill=a.get("bg_color", DEFAULT_COVER_BG_COLOR), outline="",
-                tags=(tag, "annot"))
+                tags=(f"annot_{a['id']}_cover", "annot"))
         family = a.get("font", DEFAULT_ANNOT_FONT)
         bold, italic = bool(a.get("bold")), bool(a.get("italic"))
         # 실제 폰트 파일을 못 찾아 "korea"/"helv" 내장 폰트로 대체될 때는

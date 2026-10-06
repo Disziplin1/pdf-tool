@@ -4644,6 +4644,39 @@ class TestEditExistingText(unittest.TestCase):
         pw._on_canvas_press(FakeEvent(x=sx, y=sy))
         self.assertEqual(pw.prop_panel.cover_bg_row.pack_info().get("fill"), "x")
 
+    def test_moving_adopted_text_away_from_cover_keeps_selection_box_tight(self):
+        """실사용 신고 사례: "글자수정"으로 기존 텍스트를 고친 뒤 새
+        위치로 옮기면(가리개 사각형은 원래 글자 자리에 그대로 고정돼
+        있고 새 텍스트만 옮겨짐), 선택 테두리/크기조절 핸들이 가리개
+        자리까지 통째로 감싸서 거대하고 엉뚱하게(마치 사각형이 깨진
+        것처럼) 보이는 문제가 있었다 — 가리개를 선택 bbox 계산에 쓰는
+        태그(annot_<id>)에서 제외해 고쳤다."""
+        ot, pages = self._make_pages()
+        pw = self._open_preview(pages)
+        span = pt._extract_existing_text_spans(pages[0])[0]
+        cx = (span["covers"][0] + span["covers"][2]) / 2
+        cy = (span["covers"][1] + span["covers"][3]) / 2
+        sx, sy = pt.pdf_to_screen(cx, cy, pw._cur_pw, pw._cur_ph, pw._cur_rot,
+                                   pw._sc, pw._cx, pw._cy)
+        pw._set_tool("edit_existing")
+        pw._on_canvas_press(FakeEvent(x=sx, y=sy))
+        annot = pages[0]["annots"][0]
+
+        # 가리개(covers)는 그대로 둔 채, 텍스트만 멀리 옮긴다(드래그 흉내).
+        annot["x"] += 400
+        annot["y"] += 400
+        pw._redraw_annots()
+
+        bbox = pw.canvas.bbox(f"annot_{annot['id']}")
+        self.assertIsNotNone(bbox)
+        cover_x0, cover_y0, cover_x1, cover_y1 = pw._covers_screen_rect(annot)
+        cover_w = cover_x1 - cover_x0
+        bbox_w = bbox[2] - bbox[0]
+        self.assertLess(bbox_w, cover_w * 3,
+            "텍스트를 가리개에서 멀리 옮겨도 선택 bbox는 텍스트 자체 크기여야 함")
+        self.assertTrue(bbox[0] > cover_x1 or bbox[1] > cover_y1,
+            "선택 bbox가 더는(멀리 떨어진) 가리개 영역을 포함하면 안 됨")
+
     def test_match_installed_font_falls_back_to_default_for_unknown_name(self):
         self.assertEqual(pt._match_installed_font("ABCDEF+SomeWeirdFontNoOneHas-Bold"),
                           pt.DEFAULT_ANNOT_FONT)
