@@ -2449,6 +2449,15 @@ class PreviewWin(tk.Toplevel):
     def _on_escape_key(self, event):
         if self._eyedropper_target is not None:
             self._cancel_eyedropper()
+            return
+        if not self.edit_mode:
+            # 편집 모드로 들어가기 전(그냥 크게 보기만 하는 중)에는 Esc로
+            # 바로 창을 닫을 수 있게 한다 — 돋보기(🔍)로 잠깐 크게 봤다가
+            # 빠르게 닫고 싶을 때를 위한 것. 편집 모드에 들어간 뒤에는
+            # (텍스트 선택 해제 등 다른 용도로 Esc를 누르다가 실수로 편집
+            # 중인 창이 통째로 닫혀버리는 걸 막기 위해) 그대로 두고 아무
+            # 일도 하지 않는다.
+            self.destroy()
 
     def _pick_pixel_color(self, e):
         """스포이드 모드에서 캔버스 클릭 지점의 색을 읽어 적용한다.
@@ -3218,6 +3227,11 @@ class OrganizeTab(tk.Frame):
     TW0, TH0 = 148, 172
     PAD      = 16
     BBAR     = 44
+    CB_ZONE  = 34   # 카드 좌상단, 체크박스(중심 15,15 반경 9)를 넉넉히 감싸는
+                    # "체크 전용" 정사각 구역 한 변의 길이. 이 구역 안에서는
+                    # 클릭이 정확히 체크박스 원 위를 맞추지 못해도(빠르게
+                    # 연속으로 누를 때 흔함) 항상 체크로만 동작하고 카드
+                    # 드래그가 시작되지 않는다.
     IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff")
 
     HOV_BTNS = [
@@ -3231,6 +3245,7 @@ class OrganizeTab(tk.Frame):
         super().__init__(master, bg=BG)
         self.pages     = []
         self.checked   = set()
+        self._last_checked_idx = None  # Shift+클릭 범위선택의 기준점(마지막으로 직접 클릭한 카드)
         self.photos    = []
         self.ghost_photos = []   # 드래그 중 마우스를 따라다니는 미리보기용
         self.scale     = 1.0
@@ -3547,14 +3562,19 @@ class OrganizeTab(tk.Frame):
             self.hover_idx = idx
             if idx is not None: self._draw_hover_ol(idx)
 
-        # 🔍/↺/⧉/🗑 같은 작은 액션 버튼 위에서는 클릭 가능함을 보여주는
-        # 손가락 커서로, 카드 본체 위에서는 "이동 가능" 커서로 구분한다.
+        # 🔍/↺/⧉/🗑 같은 작은 액션 버튼이나 체크박스 구역 위에서는 클릭
+        # 가능함(=드래그 아님)을 보여주는 손가락 커서로, 카드 본체 위에서는
+        # "이동 가능" 커서로 구분한다.
         on_button = False
         for item in self.canvas.find_overlapping(cx-4, cy-4, cx+4, cy+4):
             if any(t.startswith("ha_") for t in self.canvas.gettags(item)):
                 on_button = True
                 break
-        if on_button:
+        in_cb_zone = False
+        if idx is not None:
+            x0, y0 = self._card_xy(idx)
+            in_cb_zone = x0 <= cx <= x0 + self.CB_ZONE and y0 <= cy <= y0 + self.CB_ZONE
+        if on_button or in_cb_zone:
             self.canvas.config(cursor="hand2")
         else:
             self.canvas.config(cursor="fleur" if idx is not None else "")
@@ -3572,16 +3592,34 @@ class OrganizeTab(tk.Frame):
                     self._hov_action(parts[1], int(parts[2]))
                     return   # 여기서 반드시 종료 → 이중 실행 방지
 
-        # ② 체크박스 (cb_*)
-        for item in self.canvas.find_overlapping(cx-4, cy-4, cx+4, cy+4):
-            for t in self.canvas.gettags(item):
-                if t.startswith("cb_"):
-                    pid = self.pages[int(t.split("_")[1])]["id"]
-                    self.checked ^= {pid}
-                    self._render(); return
+        # ② 체크박스 — 카드 좌상단의 넉넉한 "체크 전용" 구역(CB_ZONE).
+        # 예전에는 체크박스 원(cb_*) 태그를 정확히 맞춰야만 체크로
+        # 인식돼서, 빠르게 연속으로 누르다 살짝 빗나가면 카드 본체 클릭
+        # 으로 새어나가 드래그(순서 변경)가 시작돼버리는 문제가 있었다
+        # (실사용 신고: "체크를 따다닥 하고 싶은데 자꾸 드래그가 됨").
+        # 태그 적중 여부 대신 카드 좌상단 모서리 좌표로 직접 판정해서,
+        # 그 구역 안에서는 아무리 빗나가게 눌러도 항상 체크만 되고 절대
+        # 드래그가 시작되지 않게 한다. Shift 를 누른 채 클릭하면 마지막
+        # 으로 직접 클릭한 카드(기준점)부터 지금 클릭한 카드까지 범위
+        # 전체를 체크한다(파일 탐색기 등에서 흔한 Shift+클릭 범위선택과
+        # 동일한 동작).
+        idx = self._xy_to_card(cx, cy)
+        if idx is not None:
+            x0, y0 = self._card_xy(idx)
+            if x0 <= cx <= x0 + self.CB_ZONE and y0 <= cy <= y0 + self.CB_ZONE:
+                shift = bool(event.state & 0x0001)
+                if shift and self._last_checked_idx is not None \
+                        and self._last_checked_idx < len(self.pages):
+                    lo, hi = sorted((self._last_checked_idx, idx))
+                    for i in range(lo, hi + 1):
+                        self.checked.add(self.pages[i]["id"])
+                else:
+                    self.checked ^= {self.pages[idx]["id"]}
+                self._last_checked_idx = idx
+                self._render()
+                return
 
         # ③ 카드 본체 → 드래그 준비
-        idx = self._xy_to_card(cx, cy)
         if idx is not None:
             self.drag_src   = idx
             self.drag_tgt   = None

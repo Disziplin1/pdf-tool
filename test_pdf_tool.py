@@ -24,10 +24,11 @@ import pdf_tool as pt
 
 
 class FakeEvent:
-    def __init__(self, x=0, y=0, delta=0):
+    def __init__(self, x=0, y=0, delta=0, state=0):
         self.x = x
         self.y = y
         self.delta = delta
+        self.state = state   # 수정자 키 비트마스크(0x0001=Shift) — 기본은 "안 눌림"
 
 
 def make_pdf(path, sizes=((595.28, 841.89), (420, 300))):
@@ -228,6 +229,79 @@ class TestOrganizeTab(unittest.TestCase):
         with patch.object(pt, "PreviewWin") as MockPreview:
             ot._on_double_click(FakeEvent(x=bx, y=by))
         MockPreview.assert_not_called()
+
+    # ── 체크박스: "체크 전용 구역"(실사용 신고 — 빠르게 체크하다 보면
+    #     자꾸 카드가 드래그됨) ──────────────────────────────────
+    def test_clicking_near_checkbox_toggles_check_without_starting_drag(self):
+        """체크박스 원(중심 15,15, 반경 9)을 정확히 못 맞추고 살짝
+        빗나가게 눌러도(체크 전용 구역 안이면) 체크만 되고, 카드 드래그가
+        시작되면 안 된다."""
+        ot = self._new_tab_with_pdf()
+        ot.update_idletasks()
+        ot._render()
+        x0, y0 = ot._card_xy(0)
+        pid0 = ot.pages[0]["id"]
+        ot._on_press(FakeEvent(x=x0 + 28, y=y0 + 5))   # 체크박스 원 밖이지만 구역 안
+        self.assertIn(pid0, ot.checked)
+        self.assertIsNone(ot.drag_src, "체크 전용 구역 클릭은 드래그를 시작하면 안 됨")
+
+    def test_clicking_checkbox_zone_again_toggles_off(self):
+        ot = self._new_tab_with_pdf()
+        ot.update_idletasks()
+        ot._render()
+        x0, y0 = ot._card_xy(0)
+        pid0 = ot.pages[0]["id"]
+        ot._on_press(FakeEvent(x=x0 + 15, y=y0 + 15))
+        self.assertIn(pid0, ot.checked)
+        ot._on_press(FakeEvent(x=x0 + 15, y=y0 + 15))
+        self.assertNotIn(pid0, ot.checked)
+
+    def test_hover_shows_hand_cursor_over_checkbox_zone(self):
+        ot = self._new_tab_with_pdf()
+        ot.update_idletasks()
+        ot._render()
+        x0, y0 = ot._card_xy(0)
+        ot._on_hover(FakeEvent(x=x0 + 20, y=y0 + 20))
+        self.assertEqual(ot.canvas.cget("cursor"), "hand2")
+
+    # ── Shift+클릭으로 체크 범위선택 ───────────────────────────
+    def test_shift_click_checkbox_selects_range_from_last_clicked(self):
+        multi_pdf = os.path.join(self.tmpdir, "multi4.pdf")
+        make_pdf(multi_pdf, sizes=((100,100),(100,100),(100,100),(100,100)))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([multi_pdf])
+        ot.update_idletasks()
+        ot._render()
+        ids = [pg["id"] for pg in ot.pages]
+
+        x0, y0 = ot._card_xy(0)
+        ot._on_press(FakeEvent(x=x0 + 15, y=y0 + 15))   # 기준점으로 0번 체크
+        self.assertEqual(ot.checked, {ids[0]})
+
+        x3, y3 = ot._card_xy(3)
+        ot._on_press(FakeEvent(x=x3 + 15, y=y3 + 15, state=0x0001))   # Shift+클릭
+        self.assertEqual(ot.checked, set(ids), "기준점부터 끝까지 전부 체크되어야 함")
+
+    def test_shift_click_range_select_adds_to_existing_selection(self):
+        """범위선택은 이미 체크돼 있던(범위 밖의) 다른 항목을 해제하지
+        않고 범위만 더해야 한다."""
+        multi_pdf = os.path.join(self.tmpdir, "multi4b.pdf")
+        make_pdf(multi_pdf, sizes=((100,100),(100,100),(100,100),(100,100)))
+        ot = pt.OrganizeTab(self.root)
+        self.addCleanup(ot.destroy)
+        ot._load_pdfs([multi_pdf])
+        ot.update_idletasks()
+        ot._render()
+        ids = [pg["id"] for pg in ot.pages]
+
+        x1, y1 = ot._card_xy(1)
+        ot._on_press(FakeEvent(x=x1 + 15, y=y1 + 15))   # 1번 체크(기준점)
+        ot.checked.add(ids[0])   # 범위 밖의 항목을 미리 체크해 둠
+
+        x3, y3 = ot._card_xy(3)
+        ot._on_press(FakeEvent(x=x3 + 15, y=y3 + 15, state=0x0001))
+        self.assertEqual(ot.checked, {ids[0], ids[1], ids[2], ids[3]})
 
     # ── 미리보기에서 편집한 내용이 카드 썸네일에도 반영 ────────
     def test_preview_change_regenerates_thumbnail_with_annots(self):
@@ -1417,7 +1491,7 @@ class TestUsabilityImprovements(unittest.TestCase):
         item = pw.canvas.find_withtag(f"annot_{annot['id']}")[0]
         self.assertEqual(pw.canvas.itemcget(item, "fill"), "#000000")
 
-    # ── Esc 로 미리보기 창이 닫히면 안 됨(오직 ✕ 버튼으로만) ──
+    # ── Esc 로 미리보기 창이 닫히면 안 됨(편집 모드일 때만) ──
     def test_escape_does_not_close_preview_window(self):
         pages = self._make_pages()
         pw, annot = self._open_preview_with_text(pages)
@@ -1425,8 +1499,26 @@ class TestUsabilityImprovements(unittest.TestCase):
         pw.bind("<Destroy>", lambda e: destroyed.append(1), add="+")
         pw.event_generate("<KeyPress>", keysym="Escape")
         pw.update()
-        self.assertEqual(destroyed, [], "Esc 를 눌러도 미리보기 창이 닫히면 안 됨")
+        self.assertEqual(destroyed, [], "편집 모드 중에는 Esc 를 눌러도 미리보기 창이 닫히면 안 됨")
         self.assertTrue(pw.winfo_exists())
+
+    def test_escape_closes_preview_window_when_not_in_edit_mode(self):
+        """실사용 요청: 돋보기(🔍)로 잠깐 크게 봤다가 Esc 로 빠르게 닫고
+        싶다는 요청 — 아직 편집 모드로 들어가지 않은(그냥 보기만 하는)
+        상태에서는 Esc 한 번에 창이 닫혀야 한다. 편집 모드에 들어간
+        뒤에는(위 테스트) 다른 용도로 Esc 를 누르다 실수로 편집 중인
+        창이 닫히면 안 되므로 그대로 유지한다. 실제 키 이벤트는 창관리자
+        없는 헤드리스 테스트 환경에서 불안정할 수 있어, 이 파일의 다른
+        포커스/키 테스트들과 동일하게 바인딩된 메서드를 직접 호출해
+        확인한다."""
+        pages = self._make_pages()
+        pw = pt.PreviewWin(self.root, pages, 0)
+        pw.update_idletasks(); pw.geometry("900x800+0+0"); pw.update_idletasks(); pw._show()
+        self.addCleanup(lambda: pw.destroy() if pw.winfo_exists() else None)
+        self.assertFalse(pw.edit_mode, "테스트 전제(아직 편집 모드 아님)가 성립해야 함")
+        pw._on_escape_key(None)
+        pw.update()
+        self.assertFalse(pw.winfo_exists(), "편집 모드가 아닐 때는 Esc 로 창이 닫혀야 함")
 
     # ── 전체화면 기본 시작 + 토글 버튼으로 창모드 전환 ─────────
     def test_preview_starts_fullscreen_and_toggle_switches_to_windowed(self):
